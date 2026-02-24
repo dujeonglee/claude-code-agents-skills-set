@@ -30,9 +30,14 @@ apt-get install -y universal-ctags
 # macOS
 brew install universal-ctags
 
-# Verify
+# Verify (after Homebrew install on macOS)
 /opt/homebrew/bin/ctags --version   # should say "Universal Ctags"
+
+# Verify (Linux with apt, or custom install)
+/path/to/bin/ctags --version        # should say "Universal Ctags"
 ```
+
+**Note:** If ctags is not in your PATH, use the full path (e.g., `/opt/homebrew/bin/ctags` on macOS, or `/usr/local/bin/ctags` on Linux).
 
 ## Usage
 
@@ -111,7 +116,7 @@ python3 ctags_index.py ./src --kinds=fgs --no-headers
 python3 ctags_index.py ./src --ctags-args="--langmap=C:.c.h -I EXPORT_SYMBOL+"
 
 # Use full path to ctags (ensures expected version is used)
-python3 ctags_index.py ./src --ctags-path=/opt/homebrew/bin/ctags
+python3 ctags_index.py ./src --ctags-path=/path/to/bin/ctags
 ```
 
 ## Examples (search_index.py)
@@ -133,7 +138,7 @@ python3 search_index.py ./src my_function --force-index
 python3 search_index.py ./src --index-only --ctags-path=/opt/homebrew/bin/ctags
 
 # Search with full ctags path
-python3 search_index.py ./src my_func --ctags-path=/opt/homebrew/bin/ctags --type function
+python3 search_index.py ./src my_func --ctags-path=/path/to/bin/ctags --type function
 ```
 
 ## Output Format (indexing.md)
