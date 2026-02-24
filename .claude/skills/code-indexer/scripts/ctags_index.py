@@ -232,13 +232,13 @@ def generate_markdown(
 
     if sort_by == "name":
         all_syms = sorted(symbols, key=lambda s: s.name.lower())
-        lines.append("| Name | Type | File | Lines | Detail |")
+        lines.append("| Name | File | Type | Lines | Detail |")
         lines.append("|------|------|------|-------|--------|")
         for s in all_syms:
             rel = os.path.relpath(s.path, root)
             detail = format_detail(s)
             lines.append(
-                f"| `{s.name}` | {s.kind} | `{rel}` | {s.start_line} - {s.end_line} | {detail} |"
+                f"| `{s.name}` | `{rel}` | {s.kind} | {s.start_line} - {s.end_line} | {detail} |"
             )
 
     elif sort_by == "type":
