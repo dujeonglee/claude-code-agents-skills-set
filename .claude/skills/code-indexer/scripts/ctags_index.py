@@ -6,6 +6,7 @@ Universal Ctags does the actual parsing (no regex). This script:
   1. Runs ctags with JSON output + end-line fields
   2. Parses the JSON Lines output
   3. Generates a structured Markdown index
+  4. Uses memory to remember past failures and avoid repeating them
 """
 
 import argparse
@@ -58,6 +59,7 @@ DEFAULT_EXCLUDES = [
 
 
 def run_ctags(
+    ctags_path: str,
     workspace: str,
     kinds: str = "dfegmstuv",
     exclude_dirs: list[str] = None,
@@ -70,7 +72,7 @@ def run_ctags(
         exclude_dirs = DEFAULT_EXCLUDES
 
     cmd = [
-        "ctags",
+        ctags_path,
         "--languages=C",
         f"--kinds-C={kinds}",
         "--fields=+neKSZ",       # n=line, e=end, K=kind(long), S=signature, Z=scope
@@ -105,7 +107,7 @@ def run_ctags(
             timeout=300,
         )
     except FileNotFoundError:
-        print("Error: 'ctags' not found. Install with: apt-get install -y universal-ctags",
+        print(f"Error: '{ctags_path}' not found. Install Universal Ctags or specify a different path.",
               file=sys.stderr)
         sys.exit(1)
     except subprocess.TimeoutExpired:
@@ -201,10 +203,14 @@ def format_detail(sym: Symbol) -> str:
 def generate_markdown(
     root: str,
     symbols: list[Symbol],
-    sort_by: str = "file",
     show_stats: bool = True,
 ) -> str:
-    """Generate indexing.md content from symbols."""
+    """Generate indexing.md content from symbols.
+
+    Consistent format (name-sorted):
+    | Name | File | Type | Lines | Detail |
+    |------|------|------|-------|--------|
+    """
     lines = []
     lines.append("# Code Index\n")
 
@@ -229,57 +235,113 @@ def generate_markdown(
             lines.append(f"> {' | '.join(parts)}\n")
 
     lines.append("---\n")
+    lines.append("| Name | File | Type | Lines | Detail |")
+    lines.append("|------|------|------|-------|--------|")
 
-    if sort_by == "name":
-        all_syms = sorted(symbols, key=lambda s: s.name.lower())
-        lines.append("| Name | File | Type | Lines | Detail |")
-        lines.append("|------|------|------|-------|--------|")
-        for s in all_syms:
-            rel = os.path.relpath(s.path, root)
-            detail = format_detail(s)
-            lines.append(
-                f"| `{s.name}` | `{rel}` | {s.kind} | {s.start_line} - {s.end_line} | {detail} |"
-            )
-
-    elif sort_by == "type":
-        by_kind = defaultdict(list)
-        for s in symbols:
-            by_kind[s.kind].append(s)
-
-        kind_order = ["function", "struct", "union", "enum", "typedef",
-                       "macro", "variable", "enumerator", "member"]
-        for kind in kind_order:
-            if kind not in by_kind:
-                continue
-            entries = sorted(by_kind[kind], key=lambda s: s.name.lower())
-            label = kind.capitalize() + ("es" if kind.endswith("s") else "s")
-            lines.append(f"\n## {label} ({len(entries)})\n")
-            lines.append("| Name | File | Lines | Detail |")
-            lines.append("|------|------|-------|--------|")
-            for s in entries:
-                rel = os.path.relpath(s.path, root)
-                detail = format_detail(s)
-                lines.append(
-                    f"| `{s.name}` | `{rel}` | {s.start_line} - {s.end_line} | {detail} |"
-                )
-
-    else:  # sort by file (default)
-        sorted_files = sorted(by_file.keys())
-        for filepath in sorted_files:
-            file_syms = sorted(by_file[filepath], key=lambda s: s.start_line)
-            rel = os.path.relpath(filepath, root)
-            lines.append(f"\n## `{rel}`\n")
-            lines.append("| Type | Name | Lines | Detail |")
-            lines.append("|------|------|-------|--------|")
-            for s in file_syms:
-                detail = format_detail(s)
-                scope_info = f" ({s.scope_kind} `{s.scope}`)" if s.scope else ""
-                lines.append(
-                    f"| {s.kind} | `{s.name}`{scope_info} | {s.start_line} - {s.end_line} | {detail} |"
-                )
+    # Sort by name for consistent output
+    for s in sorted(symbols, key=lambda x: x.name.lower()):
+        rel = os.path.relpath(s.path, root)
+        detail = format_detail(s)
+        lines.append(
+            f"| `{s.name}` | `{rel}` | {s.kind} | {s.start_line} - {s.end_line} | {detail} |"
+        )
 
     lines.append("")
     return "\n".join(lines)
+
+
+def write_memory(workspace: str, memory: dict) -> None:
+    """Write memory to the skill cache directory."""
+    cache_dir = os.path.join(workspace, ".claude", "skill-cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    memory_path = os.path.join(cache_dir, "code-indexer.json")
+    with open(memory_path, "w", encoding="utf-8") as f:
+        json.dump(memory, f, indent=2)
+
+
+def read_memory(workspace: str) -> dict:
+    """Read memory from the skill cache directory."""
+    memory_path = os.path.join(workspace, ".claude", "skill-cache", "code-indexer.json")
+    if os.path.isfile(memory_path):
+        try:
+            with open(memory_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {}
+
+
+def get_suggested_ctags_path(workspace: str) -> str | None:
+    """Get a suggested ctags path from memory, if available."""
+    memory = read_memory(workspace)
+    return memory.get("suggested_ctags_path")
+
+
+def set_suggested_ctags_path(workspace: str, ctags_path: str) -> None:
+    """Set a suggested ctags path in memory."""
+    memory = read_memory(workspace)
+    memory["suggested_ctags_path"] = ctags_path
+    memory["last_failure"] = {}
+    write_memory(workspace, memory)
+
+
+def clear_failure(workspace: str) -> None:
+    """Clear the last failure from memory."""
+    memory = read_memory(workspace)
+    memory.pop("last_failure", None)
+    memory.pop("last_success", None)
+    memory.pop("suggested_ctags_path", None)
+    write_memory(workspace, memory)
+
+
+def record_success(workspace: str, files_indexed: int, symbols_found: int) -> None:
+    """Record a successful indexing operation in memory."""
+    memory = read_memory(workspace)
+    memory["last_success"] = {
+        "timestamp": datetime.now().isoformat(),
+        "files_indexed": files_indexed,
+        "symbols_found": symbols_found,
+    }
+    if "last_failure" in memory:
+        del memory["last_failure"]
+    write_memory(workspace, memory)
+
+
+def record_failure(workspace: str, error: str, command: str) -> None:
+    """Record a failed indexing operation in memory."""
+    memory = read_memory(workspace)
+    memory["last_failure"] = {
+        "timestamp": datetime.now().isoformat(),
+        "error": error,
+        "command": command,
+        "workspace": workspace,
+    }
+
+    # Suggest known ctags paths based on error
+    if "ctags" in error.lower() and "not found" in error.lower():
+        for path in ["/opt/homebrew/bin/ctags", "/usr/local/bin/ctags", "ctags"]:
+            if os.path.isfile(path):
+                memory["suggested_ctags_path"] = path
+                break
+
+    write_memory(workspace, memory)
+
+
+def print_memory_advice(workspace: str) -> None:
+    """Print advice based on memory of past failures."""
+    memory = read_memory(workspace)
+    last_failure = memory.get("last_failure", {})
+
+    if last_failure:
+        error = last_failure.get("error", "")
+        if "ctags not found" in error.lower() or "not found" in error.lower():
+            suggested = memory.get("suggested_ctags_path")
+            if suggested and os.path.isfile(suggested):
+                print(f"> **Note**: Previous ctags failure detected. Using: {suggested}",
+                      file=sys.stderr)
+                return suggested
+
+    return None
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -294,13 +356,16 @@ def main():
     parser.add_argument("--no-headers", action="store_true", help="Skip .h files")
     parser.add_argument("--kinds", default="dfegmstuv",
                         help="ctags C kind letters to include (default: dfegmstuv = all)")
-    parser.add_argument("--sort", choices=["file", "name", "type"], default="file")
     parser.add_argument("--no-stats", action="store_true")
     parser.add_argument("--no-members", action="store_true",
                         help="Exclude struct/union members and enumerators")
     parser.add_argument("--ctags-args", default="",
                         help="Extra arguments passed directly to ctags")
+    parser.add_argument("--ctags-path", default="ctags",
+                        help="Full path to ctags executable (default: 'ctags' in PATH)")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--clear-memory", action="store_true",
+                        help="Clear memory of past failures")
 
     args = parser.parse_args()
 
@@ -310,6 +375,21 @@ def main():
         sys.exit(1)
 
     output = args.output or os.path.join(workspace, "indexing.md")
+
+    # Handle memory clearing
+    if args.clear_memory:
+        clear_failure(workspace)
+        print("Memory cleared", file=sys.stderr)
+        sys.exit(0)
+
+    # Check memory for past failures
+    suggested_path = print_memory_advice(workspace)
+
+    # If previous failure was ctags not found, try suggested path
+    if suggested_path and args.ctags_path == "ctags":
+        args.ctags_path = suggested_path
+        if args.verbose:
+            print(f"Using ctags from memory: {args.ctags_path}", file=sys.stderr)
 
     exclude_dirs = DEFAULT_EXCLUDES[:]
     if args.exclude:
@@ -321,39 +401,52 @@ def main():
 
     if args.verbose:
         print(f"Scanning {workspace}...", file=sys.stderr)
+        print(f"Using ctags: {args.ctags_path}", file=sys.stderr)
 
-    # Run ctags
-    tags = run_ctags(
-        workspace,
-        kinds=args.kinds,
-        exclude_dirs=exclude_dirs,
-        include_headers=not args.no_headers,
-        extra_args=extra_args,
-    )
+    try:
+        # Run ctags
+        tags = run_ctags(
+            args.ctags_path,
+            workspace,
+            kinds=args.kinds,
+            exclude_dirs=exclude_dirs,
+            include_headers=not args.no_headers,
+            extra_args=extra_args,
+        )
 
-    if args.verbose:
-        print(f"ctags returned {len(tags)} tags", file=sys.stderr)
+        if args.verbose:
+            print(f"ctags returned {len(tags)} tags", file=sys.stderr)
 
-    # Convert to symbols
-    skip_kinds = set()
-    if args.no_members:
-        skip_kinds = {"member", "enumerator"}
+        # Convert to symbols
+        skip_kinds = set()
+        if args.no_members:
+            skip_kinds = {"member", "enumerator"}
 
-    symbols = tags_to_symbols(tags, skip_kinds=skip_kinds)
+        symbols = tags_to_symbols(tags, skip_kinds=skip_kinds)
 
-    if args.verbose:
-        print(f"Processing {len(symbols)} symbols...", file=sys.stderr)
+        if args.verbose:
+            print(f"Processing {len(symbols)} symbols...", file=sys.stderr)
 
-    # Generate markdown
-    md = generate_markdown(workspace, symbols, args.sort, not args.no_stats)
+        # Generate markdown
+        md = generate_markdown(workspace, symbols, not args.no_stats)
 
-    # Write
-    os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
-    with open(output, "w", encoding="utf-8") as f:
-        f.write(md)
+        # Write
+        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(md)
 
-    print(f"Indexed {len(symbols)} symbols in {len(set(s.path for s in symbols))} files → {output}",
-          file=sys.stderr)
+        file_count = len(set(s.path for s in symbols))
+        print(f"Indexed {len(symbols)} symbols in {file_count} files → {output}",
+              file=sys.stderr)
+
+        # Record success
+        record_success(workspace, file_count, len(symbols))
+
+    except Exception as e:
+        # Record failure
+        cmd_str = f"{args.ctags_path} --languages=C --kinds-C={args.kinds} ..."
+        record_failure(workspace, str(e), cmd_str)
+        raise
 
 
 if __name__ == "__main__":
