@@ -27,6 +27,17 @@ import doxyfile_template
 
 
 CACHE_REL_PATH = ".claude/skill-cache/doxygen-generator.json"
+LFS_SIGNATURE = b"version https://git-lfs.github.com/spec/v1"
+
+
+def is_lfs_pointer(path: Path) -> bool:
+    """Check if a file is a Git LFS pointer (not the actual binary)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(48)
+        return head.startswith(LFS_SIGNATURE)
+    except OSError:
+        return False
 
 
 def parse_args(argv=None):
@@ -59,6 +70,8 @@ def parse_args(argv=None):
                         help="Force regeneration even if output is up-to-date.")
     parser.add_argument("--clear-cache", action="store_true",
                         help="Clear cached state and regenerate.")
+    parser.add_argument("--timeout", type=int, default=600,
+                        help="Doxygen process timeout in seconds (default: 600).")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Verbose output.")
     return parser.parse_args(argv)
@@ -230,8 +243,17 @@ def main(argv=None):
     env = plat_mod.get_env_for_subprocess()
     cmd = [str(doxygen_path), str(doxyfile_path)]
 
+    # Guard: LFS pointer check
+    if is_lfs_pointer(doxygen_path):
+        print(f"Error: Doxygen binary is a Git LFS pointer, not the actual binary: {doxygen_path}", file=sys.stderr)
+        print("Run 'git lfs pull' in the skill directory to fetch the real binary.", file=sys.stderr)
+        sys.exit(1)
+
     if args.verbose:
         print(f"Running: {' '.join(cmd)}")
+
+    timeout = args.timeout
+    print(f"Running Doxygen (timeout: {timeout}s) ...")
 
     try:
         result = subprocess.run(
@@ -240,11 +262,17 @@ def main(argv=None):
             env=env,
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        print("Error: Doxygen timed out after 600 seconds.", file=sys.stderr)
+        print(f"Error: Doxygen timed out after {timeout} seconds.", file=sys.stderr)
         save_cache(workspace, {**cache, "error": "timeout", "error_at": time.time()})
+        sys.exit(1)
+    except OSError as e:
+        print(f"Error: Failed to execute Doxygen binary: {doxygen_path}", file=sys.stderr)
+        print(f"  {e}", file=sys.stderr)
+        print("Hints: The binary may be for a different architecture, or it may be a Git LFS pointer.", file=sys.stderr)
+        print("  Try: git lfs pull   or   file " + str(doxygen_path), file=sys.stderr)
         sys.exit(1)
 
     if result.returncode != 0:

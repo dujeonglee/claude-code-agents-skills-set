@@ -20,11 +20,12 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 
 @dataclass
@@ -43,6 +44,73 @@ class SymbolInfo:
     detailed: str = ""
     references: list[str] = field(default_factory=list)      # symbols this calls
     referenced_by: list[str] = field(default_factory=list)    # symbols that call this
+
+
+# --- Standalone XML helpers (usable by both in-memory and SQLite indexes) ---
+
+def _get_text(elem: Optional[ET.Element]) -> str:
+    """Extract all text content from an element recursively."""
+    if elem is None:
+        return ""
+    return "".join(elem.itertext()).strip()
+
+
+def _parse_memberdef_element(memberdef: ET.Element) -> SymbolInfo:
+    """Parse a <memberdef> element into a SymbolInfo (standalone)."""
+    sym = SymbolInfo(
+        id=memberdef.get("id", ""),
+        name=_get_text(memberdef.find("name")),
+        kind=memberdef.get("kind", ""),
+    )
+
+    location = memberdef.find("location")
+    if location is not None:
+        sym.file = location.get("file", "")
+        sym.line = int(location.get("line", "0"))
+        sym.body_start = int(location.get("bodystart", "0"))
+        sym.body_end = int(location.get("bodyend", "0"))
+
+    sym.return_type = _get_text(memberdef.find("type"))
+
+    params = []
+    for param in memberdef.findall("param"):
+        ptype = _get_text(param.find("type"))
+        pname = _get_text(param.find("declname"))
+        if ptype or pname:
+            params.append(f"{ptype} {pname}".strip())
+    sym.params = ", ".join(params)
+
+    sym.brief = _get_text(memberdef.find("briefdescription"))
+    sym.detailed = _get_text(memberdef.find("detaileddescription"))
+
+    for ref in memberdef.findall("references"):
+        ref_name = _get_text(ref)
+        if ref_name:
+            sym.references.append(ref_name)
+
+    for ref in memberdef.findall("referencedby"):
+        ref_name = _get_text(ref)
+        if ref_name:
+            sym.referenced_by.append(ref_name)
+
+    return sym
+
+
+def _iterparse_compound(xml_path: Path) -> Iterator[SymbolInfo]:
+    """Stream-parse a Doxygen compound XML file, yielding SymbolInfo per memberdef.
+
+    Uses ET.iterparse with elem.clear() to avoid holding full trees in memory.
+    """
+    try:
+        for event, elem in ET.iterparse(str(xml_path), events=("end",)):
+            if elem.tag == "memberdef":
+                yield _parse_memberdef_element(elem)
+                elem.clear()
+            elif elem.tag == "compounddef":
+                # Clear the compound to free accumulated sub-elements
+                elem.clear()
+    except ET.ParseError:
+        return
 
 
 class DoxygenXMLIndex:
@@ -107,68 +175,22 @@ class DoxygenXMLIndex:
         self._compound_cache[refid] = root
         return root
 
-    def _get_text(self, elem: Optional[ET.Element]) -> str:
-        """Extract all text content from an element recursively."""
-        if elem is None:
-            return ""
-        return "".join(elem.itertext()).strip()
-
     def _parse_memberdef(self, memberdef: ET.Element) -> SymbolInfo:
         """Parse a <memberdef> element into a SymbolInfo."""
-        sym = SymbolInfo(
-            id=memberdef.get("id", ""),
-            name=self._get_text(memberdef.find("name")),
-            kind=memberdef.get("kind", ""),
-        )
+        return _parse_memberdef_element(memberdef)
 
-        # Location
-        location = memberdef.find("location")
-        if location is not None:
-            sym.file = location.get("file", "")
-            sym.line = int(location.get("line", "0"))
-            sym.body_start = int(location.get("bodystart", "0"))
-            sym.body_end = int(location.get("bodyend", "0"))
+    def find_symbol(self, name: str, scope: str = "") -> list[SymbolInfo]:
+        """Find all symbols matching the given name.
 
-        # Type/return type
-        sym.return_type = self._get_text(memberdef.find("type"))
-
-        # Parameters
-        params = []
-        for param in memberdef.findall("param"):
-            ptype = self._get_text(param.find("type"))
-            pname = self._get_text(param.find("declname"))
-            if ptype or pname:
-                params.append(f"{ptype} {pname}".strip())
-        sym.params = ", ".join(params)
-
-        # Brief description
-        sym.brief = self._get_text(memberdef.find("briefdescription"))
-
-        # Detailed description
-        sym.detailed = self._get_text(memberdef.find("detaileddescription"))
-
-        # References (what this function calls)
-        for ref in memberdef.findall("references"):
-            ref_name = self._get_text(ref)
-            if ref_name:
-                sym.references.append(ref_name)
-
-        # Referenced by (what calls this function)
-        for ref in memberdef.findall("referencedby"):
-            ref_name = self._get_text(ref)
-            if ref_name:
-                sym.referenced_by.append(ref_name)
-
-        return sym
-
-    def find_symbol(self, name: str) -> list[SymbolInfo]:
-        """Find all symbols matching the given name."""
+        Args:
+            name: Symbol name to look up.
+            scope: If non-empty, only return symbols whose file starts with this prefix.
+        """
         entries = self._index.get(name, [])
         results = []
 
         for entry in entries:
             if entry["is_compound"]:
-                # For compounds (files, classes), create a basic SymbolInfo
                 root = self._load_compound(entry["compound_refid"])
                 if root is None:
                     continue
@@ -184,46 +206,62 @@ class DoxygenXMLIndex:
                 if location is not None:
                     sym.file = location.get("file", "")
                     sym.line = int(location.get("line", "0"))
-                sym.brief = self._get_text(compounddef.find("briefdescription"))
+                sym.brief = _get_text(compounddef.find("briefdescription"))
+                if scope and not sym.file.startswith(scope):
+                    continue
                 results.append(sym)
             else:
-                # For members, find the memberdef in the compound file
                 root = self._load_compound(entry["compound_refid"])
                 if root is None:
                     continue
                 for memberdef in root.iter("memberdef"):
                     if memberdef.get("id") == entry["refid"]:
-                        results.append(self._parse_memberdef(memberdef))
+                        sym = self._parse_memberdef(memberdef)
+                        if scope and not sym.file.startswith(scope):
+                            break
+                        results.append(sym)
                         break
 
         return results
 
-    def get_all_symbols(self) -> list[SymbolInfo]:
-        """Get all symbols from the index (cached)."""
+    def get_all_symbols(self, scope: str = "") -> list[SymbolInfo]:
+        """Get all symbols from the index.
+
+        Uses streaming iterparse for memory efficiency on large codebases.
+        Results are cached (only the unscoped full set).
+
+        Args:
+            scope: If non-empty, only return symbols whose file starts with this prefix.
+        """
         if self._all_symbols is not None:
-            return self._all_symbols
+            syms = self._all_symbols
+            if scope:
+                return [s for s in syms if s.file.startswith(scope)]
+            return syms
 
         symbols = []
-        seen_ids = set()
+        seen_ids: set[str] = set()
 
-        for name, entries in self._index.items():
+        # Collect compound refids that have members
+        compound_refids: set[str] = set()
+        for entries in self._index.values():
             for entry in entries:
-                if entry["is_compound"]:
-                    continue  # Skip compounds for list, focus on members
-                refid = entry["refid"]
-                if refid in seen_ids:
-                    continue
-                seen_ids.add(refid)
+                if not entry["is_compound"]:
+                    compound_refids.add(entry["compound_refid"])
 
-                root = self._load_compound(entry["compound_refid"])
-                if root is None:
-                    continue
-                for memberdef in root.iter("memberdef"):
-                    if memberdef.get("id") == refid:
-                        symbols.append(self._parse_memberdef(memberdef))
-                        break
+        # Stream-parse each compound file once
+        for refid in compound_refids:
+            xml_path = self.xml_dir / f"{refid}.xml"
+            if not xml_path.exists():
+                continue
+            for sym in _iterparse_compound(xml_path):
+                if sym.id and sym.id not in seen_ids:
+                    seen_ids.add(sym.id)
+                    symbols.append(sym)
 
         self._all_symbols = symbols
+        if scope:
+            return [s for s in symbols if s.file.startswith(scope)]
         return symbols
 
     def build_callgraph(self, name: str, depth: int = 2,
@@ -268,6 +306,240 @@ class DoxygenXMLIndex:
                     if ref not in visited:
                         child = _traverse(ref, d - 1, dir_)
                         node["callers"].append(child)
+                    else:
+                        node["callers"].append({"name": ref, "calls": [], "callers": [], "cycle": True})
+
+            return node
+
+        return _traverse(name, depth, direction)
+
+
+class DoxygenSQLiteIndex:
+    """SQLite-backed symbol index — same public API as DoxygenXMLIndex.
+
+    Builds a SQLite database from Doxygen XML on first query.  Subsequent
+    queries skip XML parsing if the DB is still fresh (XML mtimes haven't
+    changed).  The database is stored alongside the XML output at
+    ``<output_dir>/symbols.db``.
+    """
+
+    def __init__(self, xml_dir: Path, db_path: Optional[Path] = None):
+        self.xml_dir = xml_dir
+        self.db_path = db_path or xml_dir.parent / "symbols.db"
+        self._conn: Optional[sqlite3.Connection] = None
+        self._ensure_db()
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def _connect(self) -> sqlite3.Connection:
+        if self._conn is None:
+            self._conn = sqlite3.connect(str(self.db_path))
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.row_factory = sqlite3.Row
+        return self._conn
+
+    def _ensure_db(self) -> None:
+        """Create or refresh the database if needed."""
+        if self.db_path.exists() and not self._is_stale():
+            return
+        self._build_db()
+
+    def _is_stale(self) -> bool:
+        """Compare DB mtime against the newest XML file mtime."""
+        try:
+            db_mtime = self.db_path.stat().st_mtime
+        except OSError:
+            return True
+        for xml_file in self.xml_dir.glob("*.xml"):
+            try:
+                if xml_file.stat().st_mtime > db_mtime:
+                    return True
+            except OSError:
+                continue
+        return False
+
+    def _build_db(self) -> None:
+        """Parse all XML files and populate the SQLite database."""
+        conn = self._connect()
+        conn.executescript("""
+            DROP TABLE IF EXISTS symbols;
+            DROP TABLE IF EXISTS refs;
+            DROP TABLE IF EXISTS meta;
+
+            CREATE TABLE symbols (
+                id         TEXT PRIMARY KEY,
+                name       TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                file       TEXT,
+                line       INTEGER,
+                body_start INTEGER,
+                body_end   INTEGER,
+                return_type TEXT,
+                params     TEXT,
+                brief      TEXT,
+                detailed   TEXT,
+                is_compound INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE refs (
+                from_id   TEXT NOT NULL,
+                to_name   TEXT NOT NULL,
+                direction TEXT NOT NULL  -- 'calls' or 'callers'
+            );
+
+            CREATE TABLE meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
+
+            CREATE INDEX idx_symbols_name ON symbols(name);
+            CREATE INDEX idx_symbols_file ON symbols(file);
+            CREATE INDEX idx_refs_from    ON refs(from_id);
+            CREATE INDEX idx_refs_to      ON refs(to_name);
+        """)
+
+        # Parse index.xml for compounds
+        index_path = self.xml_dir / "index.xml"
+        if not index_path.exists():
+            raise FileNotFoundError(f"index.xml not found at: {index_path}")
+
+        tree = ET.parse(str(index_path))
+        root = tree.getroot()
+
+        # Insert compound-level symbols and collect refids
+        compound_refids: set[str] = set()
+        for compound in root.findall("compound"):
+            crefid = compound.get("refid", "")
+            ckind = compound.get("kind", "")
+            cname = (compound.findtext("name") or "").strip()
+            if cname:
+                conn.execute(
+                    "INSERT OR IGNORE INTO symbols (id, name, kind, is_compound) VALUES (?,?,?,1)",
+                    (crefid, cname, ckind),
+                )
+            # Check if this compound has members
+            if compound.findall("member"):
+                compound_refids.add(crefid)
+
+        # Stream-parse each compound XML for member symbols
+        for refid in compound_refids:
+            xml_path = self.xml_dir / f"{refid}.xml"
+            if not xml_path.exists():
+                continue
+            for sym in _iterparse_compound(xml_path):
+                conn.execute(
+                    """INSERT OR IGNORE INTO symbols
+                       (id, name, kind, file, line, body_start, body_end,
+                        return_type, params, brief, detailed, is_compound)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,0)""",
+                    (sym.id, sym.name, sym.kind, sym.file, sym.line,
+                     sym.body_start, sym.body_end, sym.return_type,
+                     sym.params, sym.brief, sym.detailed),
+                )
+                for ref_name in sym.references:
+                    conn.execute(
+                        "INSERT INTO refs (from_id, to_name, direction) VALUES (?,?,?)",
+                        (sym.id, ref_name, "calls"),
+                    )
+                for ref_name in sym.referenced_by:
+                    conn.execute(
+                        "INSERT INTO refs (from_id, to_name, direction) VALUES (?,?,?)",
+                        (sym.id, ref_name, "callers"),
+                    )
+
+        import time as _time
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('built_at', ?)",
+            (str(_time.time()),),
+        )
+        conn.commit()
+
+    # -- public API (mirrors DoxygenXMLIndex) --------------------------------
+
+    def _row_to_symbol(self, row: sqlite3.Row) -> SymbolInfo:
+        sym = SymbolInfo(
+            id=row["id"],
+            name=row["name"],
+            kind=row["kind"],
+            file=row["file"] or "",
+            line=row["line"] or 0,
+            body_start=row["body_start"] or 0,
+            body_end=row["body_end"] or 0,
+            return_type=row["return_type"] or "",
+            params=row["params"] or "",
+            brief=row["brief"] or "",
+            detailed=row["detailed"] or "",
+        )
+        conn = self._connect()
+        for r in conn.execute(
+            "SELECT to_name FROM refs WHERE from_id=? AND direction='calls'",
+            (sym.id,),
+        ):
+            sym.references.append(r["to_name"])
+        for r in conn.execute(
+            "SELECT to_name FROM refs WHERE from_id=? AND direction='callers'",
+            (sym.id,),
+        ):
+            sym.referenced_by.append(r["to_name"])
+        return sym
+
+    def find_symbol(self, name: str, scope: str = "") -> list[SymbolInfo]:
+        conn = self._connect()
+        if scope:
+            rows = conn.execute(
+                "SELECT * FROM symbols WHERE name=? AND (file LIKE ? OR file IS NULL)",
+                (name, scope + "%"),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM symbols WHERE name=?", (name,)
+            ).fetchall()
+        return [self._row_to_symbol(r) for r in rows]
+
+    def get_all_symbols(self, scope: str = "") -> list[SymbolInfo]:
+        conn = self._connect()
+        if scope:
+            rows = conn.execute(
+                "SELECT * FROM symbols WHERE is_compound=0 AND file LIKE ?",
+                (scope + "%",),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM symbols WHERE is_compound=0"
+            ).fetchall()
+        return [self._row_to_symbol(r) for r in rows]
+
+    def build_callgraph(self, name: str, depth: int = 2,
+                        direction: str = "both") -> dict:
+        visited: set[str] = set()
+
+        def _traverse(fname: str, d: int, dir_: str) -> dict:
+            node: dict = {"name": fname, "calls": [], "callers": []}
+            if d <= 0 or fname in visited:
+                return node
+            visited.add(fname)
+
+            syms = self.find_symbol(fname)
+            if not syms:
+                return node
+
+            sym = syms[0]
+            node["kind"] = sym.kind
+            node["file"] = sym.file
+            node["line"] = sym.line
+
+            if dir_ in ("calls", "both"):
+                for ref in sym.references:
+                    if ref not in visited:
+                        node["calls"].append(_traverse(ref, d - 1, dir_))
+                    else:
+                        node["calls"].append({"name": ref, "calls": [], "callers": [], "cycle": True})
+
+            if dir_ in ("callers", "both"):
+                for ref in sym.referenced_by:
+                    if ref not in visited:
+                        node["callers"].append(_traverse(ref, d - 1, dir_))
                     else:
                         node["callers"].append({"name": ref, "calls": [], "callers": [], "cycle": True})
 
@@ -345,8 +617,9 @@ def format_list_text(symbols: list[SymbolInfo]) -> str:
 
 # --- Subcommands ---
 
-def cmd_symbol(index: DoxygenXMLIndex, args) -> None:
-    symbols = index.find_symbol(args.name)
+def cmd_symbol(index, args) -> None:
+    scope = getattr(args, "scope", "")
+    symbols = index.find_symbol(args.name, scope=scope)
     if not symbols:
         msg = f"Symbol not found: {args.name}"
         if args.format == "json":
@@ -364,7 +637,7 @@ def cmd_symbol(index: DoxygenXMLIndex, args) -> None:
             print(format_symbol_text(sym))
 
 
-def cmd_callgraph(index: DoxygenXMLIndex, args) -> None:
+def cmd_callgraph(index, args) -> None:
     graph = index.build_callgraph(args.func, depth=args.depth, direction=args.direction)
 
     if args.format == "json":
@@ -373,7 +646,7 @@ def cmd_callgraph(index: DoxygenXMLIndex, args) -> None:
         print(format_callgraph_text(graph, direction=args.direction))
 
 
-def cmd_body(index: DoxygenXMLIndex, args) -> None:
+def cmd_body(index, args) -> None:
     symbols = index.find_symbol(args.func)
     if not symbols:
         msg = f"Symbol not found: {args.func}"
@@ -415,7 +688,10 @@ def cmd_body(index: DoxygenXMLIndex, args) -> None:
             print(msg)
         return
 
-    start = max(0, sym.body_start - 1)  # Convert 1-based to 0-based
+    # Use the earlier of sym.line (declaration) and sym.body_start so that
+    # multiline signatures are included in the extracted body.
+    actual_start = min(sym.line, sym.body_start) if sym.line > 0 else sym.body_start
+    start = max(0, actual_start - 1)  # Convert 1-based to 0-based
     end = min(len(all_lines), sym.body_end)
     body_lines = all_lines[start:end]
 
@@ -423,18 +699,19 @@ def cmd_body(index: DoxygenXMLIndex, args) -> None:
         print(json.dumps({
             "name": sym.name,
             "file": sym.file,
-            "start_line": sym.body_start,
+            "start_line": actual_start,
             "end_line": sym.body_end,
             "body": "\n".join(body_lines),
         }, indent=2))
     else:
-        print(f"// {sym.file}:{sym.body_start}-{sym.body_end}")
-        for i, line in enumerate(body_lines, start=sym.body_start):
+        print(f"// {sym.file}:{actual_start}-{sym.body_end}")
+        for i, line in enumerate(body_lines, start=actual_start):
             print(f"{i:>6}  {line}")
 
 
-def cmd_list(index: DoxygenXMLIndex, args) -> None:
-    symbols = index.get_all_symbols()
+def cmd_list(index, args) -> None:
+    scope = getattr(args, "scope", "")
+    symbols = index.get_all_symbols(scope=scope)
 
     # Filter by kind
     if args.kind:
@@ -453,8 +730,9 @@ def cmd_list(index: DoxygenXMLIndex, args) -> None:
         print(format_list_text(symbols))
 
 
-def cmd_search(index: DoxygenXMLIndex, args) -> None:
-    symbols = index.get_all_symbols()
+def cmd_search(index, args) -> None:
+    scope = getattr(args, "scope", "")
+    symbols = index.get_all_symbols(scope=scope)
     pattern = args.pattern
 
     if args.regex:
@@ -499,6 +777,15 @@ def cmd_search(index: DoxygenXMLIndex, args) -> None:
 # --- Main ---
 
 def parse_args(argv=None):
+    # Shared parent parser so --format, -v, and --scope work both before and after subcommand.
+    # Using SUPPRESS so subparser defaults don't overwrite main parser values.
+    shared = argparse.ArgumentParser(add_help=False)
+    shared.add_argument("--format", choices=["text", "json"], default=argparse.SUPPRESS,
+                        help="Output format (default: text).")
+    shared.add_argument("-v", "--verbose", action="store_true", default=argparse.SUPPRESS)
+    shared.add_argument("--scope", default=argparse.SUPPRESS,
+                        help="Limit results to files under this path prefix.")
+
     parser = argparse.ArgumentParser(
         description="Query Doxygen XML documentation."
     )
@@ -510,15 +797,19 @@ def parse_args(argv=None):
     parser.add_argument("--format", choices=["text", "json"], default="text",
                         help="Output format (default: text).")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--no-sqlite", action="store_true",
+                        help="Force in-memory XML index (skip SQLite).")
+    parser.add_argument("--scope", default="",
+                        help="Limit results to files under this path prefix.")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # symbol
-    p_symbol = subparsers.add_parser("symbol", help="Look up a symbol by name.")
+    p_symbol = subparsers.add_parser("symbol", help="Look up a symbol by name.", parents=[shared])
     p_symbol.add_argument("name", help="Symbol name to look up.")
 
     # callgraph
-    p_cg = subparsers.add_parser("callgraph", help="Show call graph for a function.")
+    p_cg = subparsers.add_parser("callgraph", help="Show call graph for a function.", parents=[shared])
     p_cg.add_argument("func", help="Function name.")
     p_cg.add_argument("--depth", type=int, default=2,
                       help="Max traversal depth (default: 2).")
@@ -526,23 +817,36 @@ def parse_args(argv=None):
                       default="both", help="Graph direction (default: both).")
 
     # body
-    p_body = subparsers.add_parser("body", help="Extract function source code.")
+    p_body = subparsers.add_parser("body", help="Extract function source code.", parents=[shared])
     p_body.add_argument("func", help="Function name.")
 
     # list
-    p_list = subparsers.add_parser("list", help="List all documented symbols.")
+    p_list = subparsers.add_parser("list", help="List all documented symbols.", parents=[shared])
     p_list.add_argument("--kind", default=None,
                         help="Filter by kind (e.g., function, variable, typedef).")
     p_list.add_argument("--file", default=None,
                         help="Filter by file path (substring match).")
 
     # search
-    p_search = subparsers.add_parser("search", help="Search symbols by pattern.")
+    p_search = subparsers.add_parser("search", help="Search symbols by pattern.", parents=[shared])
     p_search.add_argument("pattern", help="Search pattern.")
     p_search.add_argument("--regex", action="store_true",
                           help="Treat pattern as regex.")
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    # The shared parent uses SUPPRESS so its defaults don't overwrite the
+    # main parser's values.  When --format/--scope/-v appear after the
+    # subcommand, the subparser parses them and they overwrite the main
+    # parser's value in the namespace.  Ensure sensible defaults here.
+    if not hasattr(args, "format") or args.format is None:
+        args.format = "text"
+    if not hasattr(args, "verbose") or args.verbose is None:
+        args.verbose = False
+    if not hasattr(args, "scope") or args.scope is None:
+        args.scope = ""
+
+    return args
 
 
 def main(argv=None):
@@ -564,11 +868,27 @@ def main(argv=None):
         print("Run generate.py first to create documentation.", file=sys.stderr)
         sys.exit(1)
 
-    try:
-        index = DoxygenXMLIndex(xml_dir)
-    except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    # Select index backend: SQLite by default, in-memory with --no-sqlite
+    use_sqlite = not getattr(args, "no_sqlite", False)
+    index = None
+
+    if use_sqlite:
+        try:
+            index = DoxygenSQLiteIndex(xml_dir)
+            if args.verbose:
+                print(f"Using SQLite index: {index.db_path}", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: SQLite index failed ({e}), falling back to in-memory.", file=sys.stderr)
+            index = None
+
+    if index is None:
+        try:
+            index = DoxygenXMLIndex(xml_dir)
+            if args.verbose:
+                print("Using in-memory XML index.", file=sys.stderr)
+        except FileNotFoundError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
     if args.command == "symbol":
         cmd_symbol(index, args)
