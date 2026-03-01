@@ -76,6 +76,8 @@ def parse_args(argv=None):
                         help=f"Max source files before aborting (default: {DEFAULT_MAX_FILES:,}).")
     parser.add_argument("--max-size-mb", type=int, default=DEFAULT_MAX_SIZE_MB,
                         help=f"Max total source size in MB before aborting (default: {DEFAULT_MAX_SIZE_MB}).")
+    parser.add_argument("--format", choices=["text", "json"], default="text",
+                        help="Output format (default: text).")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Verbose output.")
     return parser.parse_args(argv)
@@ -196,12 +198,23 @@ def detect_gatekeeper_error(stderr: str) -> bool:
     return any(ind in stderr.lower() for ind in indicators)
 
 
+def _emit_json(data: dict) -> None:
+    """Print JSON to stdout."""
+    print(json.dumps(data, indent=2))
+
+
 def main(argv=None):
     args = parse_args(argv)
+    start_time = time.time()
+    json_mode = getattr(args, "format", "text") == "json"
     workspace = Path(args.workspace).resolve()
 
     if not workspace.is_dir():
-        print(f"Error: Workspace not found: {workspace}", file=sys.stderr)
+        if json_mode:
+            _emit_json({"status": "error", "error": f"Workspace not found: {workspace}",
+                        "elapsed_seconds": round(time.time() - start_time, 2)})
+        else:
+            print(f"Error: Workspace not found: {workspace}", file=sys.stderr)
         sys.exit(1)
 
     # Resolve paths
@@ -264,7 +277,12 @@ def main(argv=None):
     cache = load_cache(workspace)
 
     if not args.force and not is_stale(workspace, output_dir, input_dirs, file_patterns, cache):
-        print("Documentation is up-to-date. Use --force to regenerate.")
+        if json_mode:
+            _emit_json({"status": "up-to-date", "output_dir": str(output_dir),
+                        "hint": "Use --force to regenerate.",
+                        "elapsed_seconds": round(time.time() - start_time, 2)})
+        else:
+            print("Documentation is up-to-date. Use --force to regenerate.")
         return
 
     # Generate or use custom Doxyfile
@@ -314,7 +332,8 @@ def main(argv=None):
         print(f"Running: {' '.join(cmd)}")
 
     timeout = args.timeout
-    print(f"Running Doxygen (timeout: {timeout}s) ...")
+    if not json_mode:
+        print(f"Running Doxygen (timeout: {timeout}s) ...")
 
     try:
         result = subprocess.run(
@@ -326,34 +345,57 @@ def main(argv=None):
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        print(f"Error: Doxygen timed out after {timeout} seconds.", file=sys.stderr)
         save_cache(workspace, {**cache, "error": "timeout", "error_at": time.time()})
+        if json_mode:
+            _emit_json({"status": "error", "error": f"Doxygen timed out after {timeout} seconds",
+                        "elapsed_seconds": round(time.time() - start_time, 2)})
+        else:
+            print(f"Error: Doxygen timed out after {timeout} seconds.", file=sys.stderr)
         sys.exit(1)
     except OSError as e:
-        print(f"Error: Failed to execute Doxygen binary: {doxygen_path}", file=sys.stderr)
-        print(f"  {e}", file=sys.stderr)
-        print("Hints: The binary may be for a different architecture, or it may be a Git LFS pointer.", file=sys.stderr)
-        print("  Try: git lfs pull   or   file " + str(doxygen_path), file=sys.stderr)
+        if json_mode:
+            _emit_json({"status": "error", "error": f"Failed to execute Doxygen binary: {e}",
+                        "elapsed_seconds": round(time.time() - start_time, 2)})
+        else:
+            print(f"Error: Failed to execute Doxygen binary: {doxygen_path}", file=sys.stderr)
+            print(f"  {e}", file=sys.stderr)
+            print("Hints: The binary may be for a different architecture, or it may be a Git LFS pointer.", file=sys.stderr)
+            print("  Try: git lfs pull   or   file " + str(doxygen_path), file=sys.stderr)
         sys.exit(1)
 
     if result.returncode != 0:
         stderr = result.stderr
-
-        if detect_gatekeeper_error(stderr):
-            print("Error: macOS Gatekeeper is blocking the binary.", file=sys.stderr)
-            print(f"Run: xattr -cr {plat_mod.get_bin_dir()}", file=sys.stderr)
-        else:
-            print(f"Error: Doxygen failed (exit code {result.returncode}).", file=sys.stderr)
-            if stderr:
-                print("Doxygen stderr:", file=sys.stderr)
-                print(stderr, file=sys.stderr)
-
         save_cache(workspace, {
             **cache,
             "error": stderr[:2000] if stderr else "unknown",
             "error_at": time.time(),
         })
+        if json_mode:
+            error_msg = "macOS Gatekeeper is blocking the binary" if detect_gatekeeper_error(stderr) \
+                else f"Doxygen failed (exit code {result.returncode})"
+            _emit_json({"status": "error", "error": error_msg,
+                        "stderr": (stderr[:2000] if stderr else ""),
+                        "elapsed_seconds": round(time.time() - start_time, 2)})
+        else:
+            if detect_gatekeeper_error(stderr):
+                print("Error: macOS Gatekeeper is blocking the binary.", file=sys.stderr)
+                print(f"Run: xattr -cr {plat_mod.get_bin_dir()}", file=sys.stderr)
+            else:
+                print(f"Error: Doxygen failed (exit code {result.returncode}).", file=sys.stderr)
+                if stderr:
+                    print("Doxygen stderr:", file=sys.stderr)
+                    print(stderr, file=sys.stderr)
         sys.exit(1)
+
+    # Item 7: Count warnings, write warnings.log, show summary
+    warning_count = 0
+    warnings_log = None
+    if result.stderr:
+        warning_lines = [l for l in result.stderr.splitlines() if "warning:" in l.lower()]
+        warning_count = len(warning_lines)
+        if warning_count > 0:
+            warnings_log = output_dir / "warnings.log"
+            warnings_log.write_text(result.stderr)
 
     if result.stderr and args.verbose:
         print("Doxygen warnings:")
@@ -369,7 +411,8 @@ def main(argv=None):
         print("Warning: XML output not found (xml/index.xml).", file=sys.stderr)
 
     # Update cache
-    save_cache(workspace, {
+    elapsed = round(time.time() - start_time, 2)
+    cache_data = {
         "generated_at": time.time(),
         "platform": plat,
         "output_dir": str(output_dir),
@@ -378,17 +421,39 @@ def main(argv=None):
         "html": html_ok and not args.no_html,
         "xml": xml_ok and not args.no_xml,
         "graphs": have_dot,
-    })
+        "warnings": warning_count,
+    }
+    save_cache(workspace, cache_data)
 
     # Summary
-    print(f"Documentation generated successfully.")
-    print(f"  Project:  {project_name}")
-    print(f"  Language: {language}")
-    if not args.no_html and html_ok:
-        print(f"  HTML:     {output_dir}/html/index.html")
-    if not args.no_xml and xml_ok:
-        print(f"  XML:      {output_dir}/xml/index.xml")
-    print(f"  Graphs:   {'enabled' if have_dot else 'disabled'}")
+    if json_mode:
+        result_data = {
+            "status": "ok",
+            "output_dir": str(output_dir),
+            "project_name": project_name,
+            "language": language,
+            "html": html_ok and not args.no_html,
+            "xml": xml_ok and not args.no_xml,
+            "graphs": have_dot,
+            "warnings": warning_count,
+            "elapsed_seconds": elapsed,
+        }
+        if warnings_log:
+            result_data["warnings_log"] = str(warnings_log)
+        _emit_json(result_data)
+    else:
+        print(f"Documentation generated successfully.")
+        print(f"  Project:  {project_name}")
+        print(f"  Language: {language}")
+        if not args.no_html and html_ok:
+            print(f"  HTML:     {output_dir}/html/index.html")
+        if not args.no_xml and xml_ok:
+            print(f"  XML:      {output_dir}/xml/index.xml")
+        print(f"  Graphs:   {'enabled' if have_dot else 'disabled'}")
+        if warning_count > 0:
+            print(f"  Warnings: {warning_count} (see {warnings_log or 'verbose output'})")
+        else:
+            print(f"  Warnings: 0")
 
 
 if __name__ == "__main__":
