@@ -1,0 +1,10 @@
+skills/doxygen-generator/bin/*/doxygen-*/bin/doxygen filter=lfs diff=lfs merge=lfs -text
+skills/doxygen-generator/bin/*/doxygen-*/bin/doxygen.exe filter=lfs diff=lfs merge=lfs -text
+skills/doxygen-generator/bin/*/doxygen-*/bin/libclang.dll filter=lfs diff=lfs merge=lfs -text
+skills/doxygen-generator/bin/*/graphviz-*/bin/dot filter=lfs diff=lfs merge=lfs -text
+skills/doxygen-generator/bin/*/graphviz-*/bin/dot.exe filter=lfs diff=lfs merge=lfs -text
+skills/doxygen-generator/bin/*/graphviz-*/bin/*.dll filter=lfs diff=lfs merge=lfs -text
+skills/doxygen-generator/bin/*/graphviz-*/lib/*.dylib filter=lfs diff=lfs merge=lfs -text
+skills/doxygen-generator/bin/*/graphviz-*/lib/*.so* filter=lfs diff=lfs merge=lfs -text
+skills/doxygen-generator/bin/*/graphviz-*/lib/graphviz/*.dylib filter=lfs diff=lfs merge=lfs -text
+skills/doxygen-generator/bin/*/graphviz-*/lib/graphviz/*.so* filter=lfs diff=lfs merge=lfs -text
