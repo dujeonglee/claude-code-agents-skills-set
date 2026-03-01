@@ -28,6 +28,88 @@ import doxyfile_template
 
 CACHE_REL_PATH = ".claude/skill-cache/doxygen-generator.json"
 
+# Workspace size limits — reject if the target is too large for safe processing
+MAX_SOURCE_FILES = 50_000
+MAX_TOTAL_SIZE_MB = 500
+
+
+def scan_workspace_size(input_dirs: list[str], file_patterns: str,
+                        max_files: int = MAX_SOURCE_FILES,
+                        max_size_mb: int = MAX_TOTAL_SIZE_MB) -> tuple[int, float]:
+    """Count source files and total size across input directories.
+
+    Returns (file_count, total_size_mb).
+    Raises SystemExit if limits are exceeded with a suggestion to narrow scope.
+    """
+    patterns = file_patterns.split()
+    file_count = 0
+    total_size = 0
+
+    for input_dir in input_dirs:
+        d = Path(input_dir)
+        if not d.exists():
+            continue
+        for pattern in patterns:
+            for f in d.rglob(pattern):
+                try:
+                    total_size += f.stat().st_size
+                    file_count += 1
+                except OSError:
+                    continue
+
+                if file_count > max_files:
+                    total_mb = total_size / (1024 * 1024)
+                    _print_too_large_error(input_dirs, file_count, total_mb, "file count",
+                                           f"{max_files:,} files")
+                    sys.exit(1)
+
+                if total_size > max_size_mb * 1024 * 1024:
+                    total_mb = total_size / (1024 * 1024)
+                    _print_too_large_error(input_dirs, file_count, total_mb, "total size",
+                                           f"{max_size_mb} MB")
+                    sys.exit(1)
+
+    return file_count, total_size / (1024 * 1024)
+
+
+def _suggest_subdirectories(input_dirs: list[str], max_depth: int = 1) -> list[str]:
+    """Find top-level subdirectories the user could target instead."""
+    suggestions = []
+    for input_dir in input_dirs:
+        d = Path(input_dir)
+        if not d.exists():
+            continue
+        for child in sorted(d.iterdir()):
+            if child.is_dir() and not child.name.startswith("."):
+                suggestions.append(str(child))
+            if len(suggestions) >= 10:
+                break
+        if len(suggestions) >= 10:
+            break
+    return suggestions
+
+
+def _print_too_large_error(input_dirs: list[str], file_count: int,
+                           total_mb: float, exceeded: str, limit: str) -> None:
+    """Print a helpful error when workspace is too large."""
+    print(f"Error: Workspace too large for safe documentation generation.", file=sys.stderr)
+    print(f"  Scanned:  {file_count:,} source files ({total_mb:,.1f} MB)", file=sys.stderr)
+    print(f"  Exceeded: {exceeded} limit of {limit}", file=sys.stderr)
+    print(f"", file=sys.stderr)
+    print(f"Suggestion: Generate docs for a smaller subdirectory instead.", file=sys.stderr)
+    print(f"  Use --input-dirs to target specific directories, e.g.:", file=sys.stderr)
+    subdirs = _suggest_subdirectories(input_dirs)
+    if subdirs:
+        example = subdirs[0]
+        print(f"    python3 generate.py <workspace> --input-dirs \"{example}\"", file=sys.stderr)
+        if len(subdirs) > 1:
+            print(f"", file=sys.stderr)
+            print(f"  Available subdirectories:", file=sys.stderr)
+            for sd in subdirs:
+                print(f"    {sd}", file=sys.stderr)
+    else:
+        print(f"    python3 generate.py <workspace> --input-dirs src/", file=sys.stderr)
+
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
@@ -81,10 +163,15 @@ def save_cache(workspace: Path, data: dict) -> None:
 
 
 def get_newest_source_mtime(workspace: Path, input_dirs: list[str],
-                            file_patterns: str) -> float:
-    """Find the newest modification time among source files."""
+                            file_patterns: str,
+                            max_files: int = MAX_SOURCE_FILES) -> float:
+    """Find the newest modification time among source files.
+
+    Stops scanning after max_files to avoid unbounded traversal.
+    """
     patterns = file_patterns.split()
     newest = 0.0
+    count = 0
     for input_dir in input_dirs:
         d = Path(input_dir)
         if not d.exists():
@@ -97,6 +184,9 @@ def get_newest_source_mtime(workspace: Path, input_dirs: list[str],
                         newest = mt
                 except OSError:
                     continue
+                count += 1
+                if count >= max_files:
+                    return newest
     return newest
 
 
@@ -148,6 +238,11 @@ def main(argv=None):
     exclude_dirs = []
     for item in raw_excludes:
         exclude_dirs.extend(item.split())
+
+    # Workspace size validation — reject huge targets early
+    file_count, total_mb = scan_workspace_size(input_dirs, file_patterns)
+    if args.verbose:
+        print(f"Source scan: {file_count:,} files, {total_mb:,.1f} MB")
 
     # Platform detection
     try:
@@ -224,7 +319,10 @@ def main(argv=None):
         if old_dir.is_dir():
             if args.verbose:
                 print(f"Removing old output: {old_dir}")
-            shutil.rmtree(old_dir)
+            try:
+                shutil.rmtree(old_dir)
+            except OSError as e:
+                print(f"Warning: Could not remove {old_dir}: {e}", file=sys.stderr)
 
     # Run Doxygen
     env = plat_mod.get_env_for_subprocess()

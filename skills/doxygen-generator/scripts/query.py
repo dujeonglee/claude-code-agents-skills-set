@@ -198,8 +198,13 @@ class DoxygenXMLIndex:
 
         return results
 
+    MAX_SYMBOLS = 100_000
+
     def get_all_symbols(self) -> list[SymbolInfo]:
-        """Get all symbols from the index (cached)."""
+        """Get all symbols from the index (cached).
+
+        Caps at MAX_SYMBOLS to prevent memory exhaustion on huge codebases.
+        """
         if self._all_symbols is not None:
             return self._all_symbols
 
@@ -223,28 +228,42 @@ class DoxygenXMLIndex:
                         symbols.append(self._parse_memberdef(memberdef))
                         break
 
+                if len(symbols) >= self.MAX_SYMBOLS:
+                    print(f"Warning: Symbol limit reached ({self.MAX_SYMBOLS:,}). "
+                          f"Results may be incomplete.", file=sys.stderr)
+                    break
+            if len(symbols) >= self.MAX_SYMBOLS:
+                break
+
         self._all_symbols = symbols
         return symbols
 
     def build_callgraph(self, name: str, depth: int = 2,
-                        direction: str = "both") -> dict:
+                        direction: str = "both",
+                        max_nodes: int = 500) -> dict:
         """Build a call graph for a function.
 
         Args:
             name: Function name to start from.
             depth: Maximum traversal depth.
             direction: 'calls' (outgoing), 'callers' (incoming), or 'both'.
+            max_nodes: Maximum number of nodes to include before truncating.
 
         Returns:
             Nested dict: {name, kind, calls: [...], callers: [...]}
         """
         visited = set()
+        node_count = 0
 
         def _traverse(fname: str, d: int, dir_: str) -> dict:
+            nonlocal node_count
             node = {"name": fname, "calls": [], "callers": []}
-            if d <= 0 or fname in visited:
+            if d <= 0 or fname in visited or node_count >= max_nodes:
+                if node_count >= max_nodes:
+                    node["truncated"] = True
                 return node
             visited.add(fname)
+            node_count += 1
 
             syms = self.find_symbol(fname)
             if not syms:
@@ -257,6 +276,9 @@ class DoxygenXMLIndex:
 
             if dir_ in ("calls", "both"):
                 for ref in sym.references:
+                    if node_count >= max_nodes:
+                        node["calls"].append({"name": ref, "calls": [], "callers": [], "truncated": True})
+                        break
                     if ref not in visited:
                         child = _traverse(ref, d - 1, dir_)
                         node["calls"].append(child)
@@ -265,6 +287,9 @@ class DoxygenXMLIndex:
 
             if dir_ in ("callers", "both"):
                 for ref in sym.referenced_by:
+                    if node_count >= max_nodes:
+                        node["callers"].append({"name": ref, "calls": [], "callers": [], "truncated": True})
+                        break
                     if ref not in visited:
                         child = _traverse(ref, d - 1, dir_)
                         node["callers"].append(child)
@@ -399,6 +424,20 @@ def cmd_body(index: DoxygenXMLIndex, args) -> None:
 
     if not source_path.exists():
         msg = f"Source file not found: {source_path}"
+        if args.format == "json":
+            print(json.dumps({"error": msg}))
+        else:
+            print(msg)
+        return
+
+    # Guard against reading extremely large files into memory
+    max_file_size = 10 * 1024 * 1024  # 10 MB
+    try:
+        file_size = source_path.stat().st_size
+    except OSError:
+        file_size = 0
+    if file_size > max_file_size:
+        msg = f"Source file too large ({file_size / (1024*1024):.1f} MB): {source_path}"
         if args.format == "json":
             print(json.dumps({"error": msg}))
         else:
