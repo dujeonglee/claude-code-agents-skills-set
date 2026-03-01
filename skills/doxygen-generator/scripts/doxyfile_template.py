@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Doxyfile template generation with sensible defaults."""
 
+import os
 from typing import Optional
 
 # Language-specific default file patterns
@@ -54,7 +55,18 @@ def generate_doxyfile(
     # Always exclude common non-source directories
     default_excludes = [".git", ".svn", "node_modules", "__pycache__", ".doxygen",
                         "build", "cmake-build-*", ".venv", "venv"]
-    all_excludes = list(set(exclude_dirs + default_excludes))
+    all_exclude_names = list(set(exclude_dirs + default_excludes))
+
+    # Resolve bare directory names to absolute paths under each input dir
+    # so Doxygen can match them properly
+    all_excludes = []
+    for name in all_exclude_names:
+        if os.path.isabs(name):
+            all_excludes.append(name)
+        else:
+            for inp in input_dirs:
+                candidate = os.path.join(inp, name)
+                all_excludes.append(candidate)
 
     have_dot = dot_path is not None and generate_graphs
     optimize_c = lang_key in ("c",)

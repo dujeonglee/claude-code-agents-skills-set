@@ -13,6 +13,7 @@ Examples:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -142,7 +143,11 @@ def main(argv=None):
     file_patterns = args.file_patterns or doxyfile_template.LANGUAGE_PATTERNS.get(
         language, doxyfile_template.LANGUAGE_PATTERNS["auto"]
     )
-    exclude_dirs = args.exclude or []
+    # Flatten exclude args: handle both --exclude "a b" and --exclude a b
+    raw_excludes = args.exclude or []
+    exclude_dirs = []
+    for item in raw_excludes:
+        exclude_dirs.extend(item.split())
 
     # Platform detection
     try:
@@ -212,6 +217,14 @@ def main(argv=None):
         doxyfile_path.write_text(doxyfile_content)
         if args.verbose:
             print(f"Doxyfile written to: {doxyfile_path}")
+
+    # Clean old output directories so stale files don't persist
+    for subdir in ("html", "xml"):
+        old_dir = output_dir / subdir
+        if old_dir.is_dir():
+            if args.verbose:
+                print(f"Removing old output: {old_dir}")
+            shutil.rmtree(old_dir)
 
     # Run Doxygen
     env = plat_mod.get_env_for_subprocess()
