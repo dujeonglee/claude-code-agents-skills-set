@@ -72,6 +72,10 @@ def parse_args(argv=None):
                         help="Clear cached state and regenerate.")
     parser.add_argument("--timeout", type=int, default=600,
                         help="Doxygen process timeout in seconds (default: 600).")
+    parser.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES,
+                        help=f"Max source files before aborting (default: {DEFAULT_MAX_FILES:,}).")
+    parser.add_argument("--max-size-mb", type=int, default=DEFAULT_MAX_SIZE_MB,
+                        help=f"Max total source size in MB before aborting (default: {DEFAULT_MAX_SIZE_MB}).")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Verbose output.")
     return parser.parse_args(argv)
@@ -91,6 +95,58 @@ def save_cache(workspace: Path, data: dict) -> None:
     cache_path = workspace / CACHE_REL_PATH
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(data, indent=2))
+
+
+DEFAULT_MAX_FILES = 100_000
+DEFAULT_MAX_SIZE_MB = 500
+
+
+def check_workspace_volume(input_dirs: list[str], file_patterns: str,
+                           exclude_dirs: list[str],
+                           max_files: int, max_size_mb: int) -> None:
+    """Count source files and total size; abort if limits are exceeded."""
+    patterns = file_patterns.split()
+    exclude_set = set(exclude_dirs)
+    file_count = 0
+    total_bytes = 0
+
+    for input_dir in input_dirs:
+        d = Path(input_dir)
+        if not d.exists():
+            continue
+        for pattern in patterns:
+            for f in d.rglob(pattern):
+                # Skip files under excluded directories
+                if exclude_set and any(part in exclude_set for part in f.parts):
+                    continue
+                try:
+                    total_bytes += f.stat().st_size
+                    file_count += 1
+                except OSError:
+                    continue
+
+    total_mb = total_bytes / (1024 * 1024)
+    errors = []
+    if file_count > max_files:
+        errors.append(f"  File count: {file_count:,} (limit: {max_files:,})")
+    if total_mb > max_size_mb:
+        errors.append(f"  Total size: {total_mb:,.1f} MB (limit: {max_size_mb:,} MB)")
+
+    if errors:
+        print("Error: Workspace is too large to process safely.", file=sys.stderr)
+        for line in errors:
+            print(line, file=sys.stderr)
+        print("\nSuggestions:", file=sys.stderr)
+        print("  1. Use --input-dirs to target specific subdirectories:", file=sys.stderr)
+        print("       python3 generate.py /project --input-dirs src/ include/", file=sys.stderr)
+        print("  2. Use --exclude to skip large directories:", file=sys.stderr)
+        print("       python3 generate.py /project --exclude test vendor third_party", file=sys.stderr)
+        print("  3. Raise limits with --max-files / --max-size-mb:", file=sys.stderr)
+        print(f"       python3 generate.py /project --max-files {file_count + 10000} --max-size-mb {int(total_mb) + 100}",
+              file=sys.stderr)
+        sys.exit(1)
+
+    return
 
 
 def get_newest_source_mtime(workspace: Path, input_dirs: list[str],
@@ -161,6 +217,11 @@ def main(argv=None):
     exclude_dirs = []
     for item in raw_excludes:
         exclude_dirs.extend(item.split())
+
+    # Volume check — abort early if workspace is too large
+    check_workspace_volume(input_dirs, file_patterns, exclude_dirs,
+                           max_files=args.max_files,
+                           max_size_mb=args.max_size_mb)
 
     # Platform detection
     try:
