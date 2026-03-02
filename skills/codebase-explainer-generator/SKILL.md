@@ -151,14 +151,19 @@ Spawn **two** foreground Agents in parallel (subagent_type: general-purpose, do 
 
 Using `analysis.json`, `module_design.json`, and the two draft files, write the final documentation:
 
-7. **Write `00-index.md`** — Architecture Overview:
-   - Project name, language, build system, scale (files/lines)
-   - Layer/architecture diagram (ASCII)
-   - Module map table: name, file count, purpose, **porting impact** (one line each)
-   - Key data structures summary with platform dependency flags
-   - Cross-module data flow overview
-   - **Platform dependency triage table**: module, impact level, platform APIs used, porting notes
-   - Glossary of project-specific terms
+7. **Write `00-index.md`** — Architecture Overview. This is the most important doc — it must be comprehensive enough to serve as a standalone porting reference. Target **250-400 lines**. Include ALL of the following sections:
+
+   a. **Project summary table**: name, language, build system, scale (files/lines/symbols), entry points
+   b. **Layer diagram (ASCII)**: Multi-layer architecture with file annotations in each box. Show which modules belong to each layer and list key source files per layer box. Use at least 5-8 layers for non-trivial codebases.
+   c. **Signal/data flow summary**: 3-5 sentences explaining how data flows top-to-bottom through the layers.
+   d. **Module map table**: columns: #, Module, Files, Key source files, Purpose, Porting impact. Link each module to its per-module doc.
+   e. **Key data structures table**: top 10-15 structures with columns: #, Structure, Module, Fields (count), Platform dep., Purpose.
+   f. **Structure ownership graph**: ASCII tree showing how key structures are nested/embedded (e.g., `slsi_dev` embeds `slsi_hip` which holds `hip_priv`). This reveals the runtime object model.
+   g. **Cross-module data flow**: For the top 3-5 flows (init, TX, RX, teardown, signaling), show function-level call chains with module boundary crossings. Format: `function() [module] --> function() [module]`. Reference calltrace.md for full traces.
+   h. **Platform dependency triage table**: module, impact level (CRITICAL/HIGH/MEDIUM/LOW/NONE), platform APIs used, porting notes. Cover ALL modules.
+   i. **Porting strategy summary**: Numbered steps (5-8) for recommended porting order, starting from OS abstraction layer through to wireless framework adaptation.
+   j. **Cross-module edge summary table**: All edges from `module_design.json`. Columns: #, From, To, Relationship. This is essential for understanding coupling.
+   k. **Glossary**: ALL project-specific acronyms and terms (target 15-25 entries). Include full expansions and one-sentence descriptions.
 
 8. **Write `data-structures.md`** — from the draft:
    - Integrate the subagent's draft with module_design.json context
@@ -239,6 +244,40 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
     - **Doxygen skill**: <absolute path to $DOXYGEN_DIR>
     - **Generated from**: codebase-explainer-generator
     - **Generated date**: <YYYY-MM-DD>
+
+    ## Verification Summary
+
+    All documentation was fact-checked against the doxygen symbol index during generation (Phase 5).
+
+    | Document | Claims | Verified | Corrections | Accuracy |
+    |----------|--------|----------|-------------|----------|
+    | 00-index.md | <N> | <N> | <N> | <N%> |
+    | data-structures.md | <N> | <N> | <N> | <N%> |
+    | calltrace.md | <N> | <N> | <N> | <N%> |
+    | ... (sample of per-module docs) | ... | ... | ... | ... |
+
+    **Overall accuracy**: <N%> across <N> total claims.
+
+    Corrections applied during generation:
+    - <list of HIGH/MEDIUM confidence corrections that were applied>
+
+    ### Manual Verification
+
+    To re-verify any document against the current doxygen index:
+
+    ```
+    Spawn a verification subagent with:
+    > You are a verification subagent. Read the topic skill file at `$SKILL_DIR/topics/verification.md` for your full instructions.
+    >
+    > Document to verify: `$OUTPUT_DIR/<doc-file>.md`
+    > Workspace: `$WORKSPACE`
+    > Doxygen query script: `$DOXYGEN_DIR/scripts/query.py`
+    >   Usage: `python3 $DOXYGEN_DIR/scripts/query.py $WORKSPACE <command> [args]`
+    >
+    > Output: Write your correction report as JSON to `$OUTPUT_DIR/verification-<doc-file>.json`
+    ```
+
+    **Trigger phrases**: "verify pcie_scsc docs", "fact-check documentation", "check doc accuracy"
 
     ## Incremental Update
 
@@ -401,14 +440,16 @@ Spawn **one foreground Agent per documentation file** in parallel (subagent_type
     - Skip LOW-confidence corrections (note them for the user)
     - Leave UNVERIFIABLE claims as-is (they are not wrong)
 
-13. **Delete draft and verification files**:
+13. **Update the generated SKILL.md verification summary**: Fill in the `## Verification Summary` table in `$OUTPUT_DIR/SKILL.md` with actual results from each verification JSON — document name, total claims, verified count, corrections count, and accuracy rate. List the corrections that were applied. This is critical — without this, the generated skill has no provenance information.
+
+14. **Delete draft and verification files**:
     - Remove `*-draft.md` files
     - Remove `verification-*.json` files (their corrections are applied)
 
-14. **Check file sizes**: Each doc must be under 100KB. If any exceeds this:
+15. **Check file sizes**: Each doc must be under 100KB. If any exceeds this:
     - Split into sub-module docs (e.g., `02a-module-core.md`, `02b-module-transport.md`)
 
-15. **Report results** to the user:
+16. **Report results** to the user:
     - List all files created with sizes
     - Module count and total documentation size
     - Verification summary: claims checked, corrections applied, accuracy rate
