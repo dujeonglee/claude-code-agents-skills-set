@@ -131,12 +131,15 @@ Spawn **two** foreground Agents in parallel (subagent_type: general-purpose, do 
 **Calltrace subagent:**
 > You are a calltrace subagent. Read the topic skill file at `$SKILL_DIR/topics/calltrace.md` for your full instructions.
 >
+> **CRITICAL**: Start with Step 0 — read the `variants` array from `analysis.json` BEFORE tracing any flows. Every function name you write in the output MUST be verified via doxygen (`symbol` or `search` command). Never fabricate function names.
+>
 > Inputs:
-> - Analysis data: `$OUTPUT_DIR/analysis.json`
+> - Analysis data: `$OUTPUT_DIR/analysis.json` (contains `variants` array with compile-time variant metadata)
 > - Module design: `$OUTPUT_DIR/module_design.json`
 > - Workspace: `$WORKSPACE`
 > - Doxygen query script: `$DOXYGEN_DIR/scripts/query.py`
 >   Usage: `python3 $DOXYGEN_DIR/scripts/query.py $WORKSPACE <command> [args]`
+>   Key commands: `symbol <name>` (verify existence), `callgraph <name>` (trace calls), `body <name>` (read source), `search <term>` (find symbols)
 >
 > Output: Write your findings to `$OUTPUT_DIR/calltrace-draft.md`
 
@@ -203,7 +206,7 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
     >
     > Use doxygen queries to verify function signatures and symbol locations — do not guess.
 
-11. **Write `SKILL.md`** for the generated explainer skill:
+11. **Write `SKILL.md`** for the generated explainer skill. **IMPORTANT: The generated SKILL.md must be fully self-contained. Inline ALL content below — do NOT replace any section with "see the generator skill" references. Every U-step (U1 through U7) must appear in full with all `$VARIABLES` substituted.**
     ```markdown
     # <Project> Codebase Explainer
 
@@ -285,27 +288,82 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
     ### U3: Module Design Update
 
     If `update_plan.json` has entries in `module_design_updates`:
-    1. If `new_module_needed` is true, spawn the module-design subagent (same as Phase 2 of the generator) to reassign files
+    1. If `new_module_needed` is true, spawn a module-design subagent:
+       > You are a module-design subagent. Read the topic skill file at `$SKILL_DIR/topics/module-design.md` for your full instructions.
+       >
+       > Inputs:
+       > - Analysis data: `$OUTPUT_DIR/analysis.json`
+       > - Workspace: `$WORKSPACE`
+       > - Doxygen query script: `$DOXYGEN_DIR/scripts/query.py`
+       >   Usage: `python3 $DOXYGEN_DIR/scripts/query.py $WORKSPACE <command> [args]`
+       >
+       > Output: Write `$OUTPUT_DIR/module_design.json`
     2. Otherwise, apply file assignments directly: update `module_design.json` to add new file assignments and remove deleted files
 
     ### U4: Selective Doc Regeneration
 
     For each doc in `docs_to_regenerate`:
-    1. Re-run the appropriate subagent for that module's per-module doc (same prompt as Phase 4 per-module subagents, but only for the affected modules)
-    2. If `regenerate_data_structures` is true, re-run the data-structures subagent (Phase 3)
-    3. If `regenerate_calltrace` is true, re-run the calltrace subagent (Phase 3)
-    4. If `regenerate_index` is true, rewrite `00-index.md` (Phase 4 step 7)
-    5. If `regenerate_skill_md` is true, rewrite `SKILL.md` module map table
-
-    Use the generator skill's topic files and subagent prompts — they are the same as in the initial generation.
+    1. For affected per-module docs, spawn per-module doc subagents (one per batch of 5-6 modules):
+       > You are a per-module documentation subagent. Write docs for these modules: <BATCH_LIST>
+       >
+       > Inputs:
+       > - Module design: `$OUTPUT_DIR/module_design.json`
+       > - Analysis data: `$OUTPUT_DIR/analysis.json`
+       > - Architecture overview: `$OUTPUT_DIR/00-index.md`
+       > - Data structures reference: `$OUTPUT_DIR/data-structures.md`
+       > - Workspace: `$WORKSPACE`
+       > - Doxygen query script: `$DOXYGEN_DIR/scripts/query.py`
+       >   Usage: `python3 $DOXYGEN_DIR/scripts/query.py $WORKSPACE <command> [args]`
+       >
+       > For each module, write `$OUTPUT_DIR/NN-<module-name>.md`.
+    2. If `regenerate_data_structures` is true, spawn a data-structures subagent:
+       > You are a data-structures subagent. Read the topic skill file at `$SKILL_DIR/topics/data-structures.md` for your full instructions.
+       >
+       > Inputs:
+       > - Analysis data: `$OUTPUT_DIR/analysis.json`
+       > - Module design: `$OUTPUT_DIR/module_design.json`
+       > - Workspace: `$WORKSPACE`
+       > - Doxygen query script: `$DOXYGEN_DIR/scripts/query.py`
+       >   Usage: `python3 $DOXYGEN_DIR/scripts/query.py $WORKSPACE <command> [args]`
+       >
+       > Output: Write `$OUTPUT_DIR/data-structures-draft.md`
+    3. If `regenerate_calltrace` is true, spawn a calltrace subagent:
+       > You are a calltrace subagent. Read the topic skill file at `$SKILL_DIR/topics/calltrace.md` for your full instructions.
+       >
+       > **CRITICAL**: Start with Step 0 — read the `variants` array from `analysis.json` BEFORE tracing any flows. Every function name you write MUST be verified via doxygen.
+       >
+       > Inputs:
+       > - Analysis data: `$OUTPUT_DIR/analysis.json` (contains `variants` array)
+       > - Module design: `$OUTPUT_DIR/module_design.json`
+       > - Workspace: `$WORKSPACE`
+       > - Doxygen query script: `$DOXYGEN_DIR/scripts/query.py`
+       >   Usage: `python3 $DOXYGEN_DIR/scripts/query.py $WORKSPACE <command> [args]`
+       >
+       > Output: Write `$OUTPUT_DIR/calltrace-draft.md`
+    4. If `regenerate_index` is true, rewrite `00-index.md` (project overview, layer diagram, module map, key structures, platform triage table)
+    5. If `regenerate_skill_md` is true, rewrite this `SKILL.md` module map table
 
     ### U5: Selective Verification
 
-    Run verification subagents (Phase 5) only for the regenerated docs, not the entire set.
+    For each regenerated doc, spawn a verification subagent:
+    > You are a verification subagent. Read the topic skill file at `$SKILL_DIR/topics/verification.md` for your full instructions.
+    >
+    > Document to verify: `$OUTPUT_DIR/<doc-file>.md`
+    > Workspace: `$WORKSPACE`
+    > Doxygen query script: `$DOXYGEN_DIR/scripts/query.py`
+    >   Usage: `python3 $DOXYGEN_DIR/scripts/query.py $WORKSPACE <command> [args]`
+    >
+    > Output: Write `$OUTPUT_DIR/verification-<doc-file>.json`
+
+    Only verify regenerated docs, not the entire set.
 
     ### U6: Apply Corrections
 
-    Same as Phase 6 of the generator — apply HIGH/MEDIUM confidence corrections from verification.
+    Review each verification JSON:
+    - Apply all HIGH-confidence corrections immediately
+    - Apply MEDIUM-confidence corrections after reading the source to confirm
+    - Skip LOW-confidence corrections (note them for the user)
+    - Leave UNVERIFIABLE claims as-is
 
     ### U7: Finalize
 

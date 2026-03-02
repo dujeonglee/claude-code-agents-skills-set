@@ -322,24 +322,90 @@ def build_directory_tree(workspace: Path, max_depth: int,
 # ---------------------------------------------------------------------------
 
 def extract_include_edges(files: List[Dict], workspace: Path) -> List[Dict[str, str]]:
-    """Extract raw include/import edges between source files (truth only, no clustering)."""
+    """Extract raw include/import edges between source files (truth only, no clustering).
+
+    For C/C++ includes inside #ifdef/#if blocks, adds a "condition" field
+    indicating which CONFIG flag guards the include.
+    """
     edges: List[Dict[str, str]] = []
     file_names = {f["name"] for f in files}
     file_paths = {f["path"] for f in files}
 
+    # Regex to track preprocessor conditionals
+    ifdef_re = re.compile(
+        r"^\s*#\s*(?:ifdef\s+|if\s+defined\s*\(?\s*|if\s+IS_ENABLED\s*\(\s*)"
+        r"(CONFIG_\w+)",
+        re.MULTILINE,
+    )
+    endif_re = re.compile(r"^\s*#\s*endif", re.MULTILINE)
+    else_re = re.compile(r"^\s*#\s*(?:else|elif)", re.MULTILINE)
+    include_re = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.MULTILINE)
+
     for f in files:
         content = read_head(Path(f["abs_path"]), 16384)
-        # C/C++ includes
-        for m in re.finditer(r'#include\s*"([^"]+)"', content):
-            target = m.group(1)
-            target_base = os.path.basename(target)
-            # Check if the included file exists in the project
-            if target in file_paths or target_base in file_names:
-                edges.append({
-                    "from": f["path"],
-                    "to": target,
-                    "type": "include",
-                })
+
+        # Build a position->condition map for C/C++ files
+        condition_at: Dict[int, Optional[str]] = {}
+        if f["ext"] in (".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"):
+            cond_stack: List[Optional[str]] = []
+            # Collect all preprocessor directives with positions
+            directives: List[tuple] = []
+            for m in ifdef_re.finditer(content):
+                directives.append((m.start(), "ifdef", m.group(1)))
+            for m in endif_re.finditer(content):
+                directives.append((m.start(), "endif", None))
+            for m in else_re.finditer(content):
+                directives.append((m.start(), "else", None))
+            directives.sort(key=lambda x: x[0])
+
+            # Walk directives to build condition ranges
+            cond_ranges: List[tuple] = []  # (start, end, condition)
+            range_start = 0
+            for pos, kind, val in directives:
+                cur_cond = cond_stack[-1] if cond_stack else None
+                cond_ranges.append((range_start, pos, cur_cond))
+                if kind == "ifdef":
+                    cond_stack.append(val)
+                elif kind == "else":
+                    if cond_stack:
+                        cond_stack[-1] = "!" + cond_stack[-1] if cond_stack[-1] and not cond_stack[-1].startswith("!") else (cond_stack[-1][1:] if cond_stack[-1] and cond_stack[-1].startswith("!") else None)
+                elif kind == "endif":
+                    if cond_stack:
+                        cond_stack.pop()
+                range_start = pos
+
+            cond_ranges.append((range_start, len(content), cond_stack[-1] if cond_stack else None))
+
+            # For each include, find its condition
+            for m in include_re.finditer(content):
+                target = m.group(1)
+                target_base = os.path.basename(target)
+                if target in file_paths or target_base in file_names:
+                    condition = None
+                    for rstart, rend, cond in cond_ranges:
+                        if rstart <= m.start() < rend:
+                            condition = cond
+                            break
+                    edge: Dict[str, str] = {
+                        "from": f["path"],
+                        "to": target,
+                        "type": "include",
+                    }
+                    if condition:
+                        edge["condition"] = condition
+                    edges.append(edge)
+        else:
+            # Non-C files: simple include extraction
+            for m in re.finditer(r'#include\s*"([^"]+)"', content):
+                target = m.group(1)
+                target_base = os.path.basename(target)
+                if target in file_paths or target_base in file_names:
+                    edges.append({
+                        "from": f["path"],
+                        "to": target,
+                        "type": "include",
+                    })
+
         # Python imports
         for m in re.finditer(r"^(?:from|import)\s+([\w.]+)", content, re.MULTILINE):
             mod_name = m.group(1).split(".")[0]
@@ -352,6 +418,204 @@ def extract_include_edges(files: List[Dict], workspace: Path) -> List[Dict[str, 
                 })
 
     return edges
+
+
+# ---------------------------------------------------------------------------
+# Variant Detection
+# ---------------------------------------------------------------------------
+
+def detect_conditional_includes(include_edges: List[Dict[str, str]]) -> List[Dict]:
+    """Find pairs of includes guarded by opposite conditions (e.g., hip5.h vs hip4.h).
+
+    Looks for edges from the same file where one has condition CONFIG_X and
+    the other has !CONFIG_X, indicating a compile-time variant.
+    """
+    variants: List[Dict] = []
+    # Group conditional includes by source file
+    by_source: Dict[str, List[Dict]] = {}
+    for edge in include_edges:
+        cond = edge.get("condition")
+        if cond:
+            by_source.setdefault(edge["from"], []).append(edge)
+
+    for src, edges in by_source.items():
+        # Look for complementary conditions
+        cond_map: Dict[str, Dict] = {}
+        for edge in edges:
+            cond = edge["condition"]
+            cond_map[cond] = edge
+
+        for cond, edge in list(cond_map.items()):
+            if cond.startswith("!"):
+                positive = cond[1:]
+            else:
+                positive = cond
+                cond = "!" + cond
+            if cond in cond_map:
+                neg_edge = cond_map[cond]
+                # Found a pair: positive config includes one file, else includes another
+                variants.append({
+                    "type": "conditional_include",
+                    "config": positive,
+                    "selector_file": src,
+                    "when_enabled": edge["to"] if not edge["condition"].startswith("!") else neg_edge["to"],
+                    "when_disabled": neg_edge["to"] if not edge["condition"].startswith("!") else edge["to"],
+                })
+                # Remove the pair so we don't duplicate
+                del cond_map[cond]
+
+    return variants
+
+
+def detect_variant_functions(files: List[Dict], workspace: Path) -> List[Dict]:
+    """Find function name pairs suggesting versioned implementations.
+
+    Detects patterns like hip4_init()/hip5_init() defined in different files,
+    or transport_v1_send()/transport_v2_send().
+    """
+    # Collect function definitions per file
+    func_re = re.compile(
+        r"^(?:static\s+)?(?:inline\s+)?(?:const\s+)?"
+        r"(?:void|int|bool|u8|u16|u32|u64|s8|s16|s32|s64|"
+        r"unsigned|signed|char|short|long|size_t|ssize_t|"
+        r"struct\s+\w+\s*\*?|enum\s+\w+|[\w_]+_t)\s+"
+        r"(\w+)\s*\(",
+        re.MULTILINE,
+    )
+
+    # Version-like suffixes: v1/v2, 4/5, _old/_new, _legacy
+    version_re = re.compile(r"^(.+?)(\d+|_v\d+|_old|_new|_legacy|_next)$")
+
+    file_funcs: Dict[str, List[str]] = {}
+    for f in files:
+        if f["ext"] not in (".c", ".cc", ".cpp", ".cxx"):
+            continue
+        content = read_head(Path(f["abs_path"]), 32768)
+        funcs = func_re.findall(content)
+        if funcs:
+            file_funcs[f["path"]] = funcs
+
+    # Group functions by their "stem" (name without version suffix)
+    stem_map: Dict[str, List[tuple]] = {}  # stem -> [(func_name, file_path)]
+    for fpath, funcs in file_funcs.items():
+        for func in funcs:
+            m = version_re.match(func)
+            if m:
+                stem = m.group(1)
+                suffix = m.group(2)
+                stem_map.setdefault(stem, []).append((func, suffix, fpath))
+
+    variants: List[Dict] = []
+    seen_stems: Set[str] = set()
+    for stem, entries in stem_map.items():
+        if len(entries) < 2 or stem in seen_stems:
+            continue
+        # Only report if functions are in different files
+        files_involved = set(e[2] for e in entries)
+        if len(files_involved) < 2:
+            continue
+        seen_stems.add(stem)
+        variants.append({
+            "type": "function_pair",
+            "stem": stem,
+            "implementations": [
+                {"function": e[0], "suffix": e[1], "file": e[2]}
+                for e in entries
+            ],
+        })
+
+    return variants
+
+
+def parse_makefile_variants(workspace: Path) -> List[Dict]:
+    """Parse Makefile for ifeq/else blocks that select different .o files.
+
+    Detects patterns like:
+        ifeq ($(CONFIG_SCSC_WLAN_HIP5),y)
+        scsc_wlan-$(CONFIG_SCSC_WLAN) += hip5.o
+        else
+        scsc_wlan-$(CONFIG_SCSC_WLAN) += hip4.o
+        endif
+    """
+    makefile = workspace / "Makefile"
+    if not makefile.exists():
+        # Try alternate names
+        for alt in ("makefile", "GNUmakefile"):
+            alt_path = workspace / alt
+            if alt_path.exists():
+                makefile = alt_path
+                break
+        else:
+            return []
+
+    try:
+        content = makefile.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    variants: List[Dict] = []
+    ifeq_re = re.compile(
+        r"^\s*ifeq\s+\(\$\((\w+)\)\s*,\s*(\w+)\)",
+        re.MULTILINE,
+    )
+
+    obj_re = re.compile(r"[\w-]+-\$\(\w+\)\s*\+=\s*(\S+\.o)")
+    lines = content.split("\n")
+    i = 0
+    while i < len(lines):
+        m = ifeq_re.match(lines[i])
+        if m:
+            config = m.group(1)
+            # Collect .o targets in the if-branch and else-branch
+            if_objs: List[str] = []
+            else_objs: List[str] = []
+            in_else = False
+            depth = 1
+            j = i + 1
+            while j < len(lines) and depth > 0:
+                line = lines[j].strip()
+                if line.startswith("ifeq") or line.startswith("ifneq") or line.startswith("ifdef") or line.startswith("ifndef"):
+                    depth += 1
+                elif line == "endif":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif line == "else" and depth == 1:
+                    in_else = True
+                    j += 1
+                    continue
+
+                if depth == 1:
+                    om = obj_re.search(lines[j])
+                    if om:
+                        obj_name = om.group(1)
+                        src_name = obj_name.replace(".o", ".c")
+                        if in_else:
+                            else_objs.append(src_name)
+                        else:
+                            if_objs.append(src_name)
+                j += 1
+
+            if if_objs and else_objs:
+                variants.append({
+                    "type": "makefile_conditional",
+                    "config": config,
+                    "when_enabled": if_objs,
+                    "when_disabled": else_objs,
+                })
+        i += 1
+
+    return variants
+
+
+def detect_variants(files: List[Dict], workspace: Path,
+                    include_edges: List[Dict[str, str]]) -> List[Dict]:
+    """Combine all variant detection signals into a unified list."""
+    variants: List[Dict] = []
+    variants.extend(detect_conditional_includes(include_edges))
+    variants.extend(detect_variant_functions(files, workspace))
+    variants.extend(parse_makefile_variants(workspace))
+    return variants
 
 
 # ---------------------------------------------------------------------------
@@ -575,9 +839,27 @@ def format_text(data: Dict[str, Any]) -> str:
     include_edges = data.get("include_edges", [])
     lines.append(f"\n--- Include/Import Edges ({len(include_edges)}) ---")
     for edge in include_edges[:100]:
-        lines.append(f"  {edge['from']} --{edge['type']}--> {edge['to']}")
+        cond = edge.get("condition", "")
+        cond_str = f"  [if {cond}]" if cond else ""
+        lines.append(f"  {edge['from']} --{edge['type']}--> {edge['to']}{cond_str}")
     if len(include_edges) > 100:
         lines.append(f"  ... and {len(include_edges) - 100} more edges")
+
+    variants = data.get("variants", [])
+    if variants:
+        lines.append(f"\n--- Compile-time Variants ({len(variants)}) ---")
+        for v in variants:
+            vtype = v["type"]
+            if vtype == "conditional_include":
+                lines.append(f"  [{v['config']}] {v['selector_file']}: "
+                             f"{v['when_enabled']} (enabled) vs {v['when_disabled']} (disabled)")
+            elif vtype == "makefile_conditional":
+                lines.append(f"  [{v['config']}] Makefile: "
+                             f"{', '.join(v['when_enabled'])} (enabled) vs "
+                             f"{', '.join(v['when_disabled'])} (disabled)")
+            elif vtype == "function_pair":
+                impls = ", ".join(f"{i['function']} in {i['file']}" for i in v["implementations"])
+                lines.append(f"  [function pair] stem={v['stem']}: {impls}")
 
     lines.append(f"\n--- Key Files ({len(data['key_files'])}) ---")
     for kf in data["key_files"]:
@@ -645,6 +927,9 @@ def analyze(workspace: Path, max_depth: int = 4,
     # Include/import edges
     include_edges = extract_include_edges(files, workspace)
 
+    # Variant detection
+    variants = detect_variants(files, workspace, include_edges)
+
     # Key files
     key_files = find_key_files(workspace, files, build_system)
 
@@ -678,6 +963,7 @@ def analyze(workspace: Path, max_depth: int = 4,
         "files": files_output,
         "directory_tree": tree,
         "include_edges": include_edges,
+        "variants": variants,
         "key_files": key_files,
         "entry_points": entry_points,
         "config_files": config_files,
@@ -734,6 +1020,21 @@ def diff_analysis(old_path: Path, new_path: Path) -> Dict[str, Any]:
         for e in sorted(old_edges - new_edges)
     ]
 
+    # Variant differences
+    def _variant_key(v: Dict) -> str:
+        if v["type"] == "conditional_include":
+            return f"ci:{v['config']}:{v['selector_file']}"
+        elif v["type"] == "makefile_conditional":
+            return f"mk:{v['config']}"
+        elif v["type"] == "function_pair":
+            return f"fp:{v['stem']}"
+        return json.dumps(v, sort_keys=True)
+
+    old_variants = {_variant_key(v): v for v in old.get("variants", [])}
+    new_variants = {_variant_key(v): v for v in new.get("variants", [])}
+    new_variant_list = [new_variants[k] for k in sorted(set(new_variants) - set(old_variants))]
+    removed_variant_list = [old_variants[k] for k in sorted(set(old_variants) - set(new_variants))]
+
     # Stats delta
     old_stats = old.get("stats", {})
     new_stats = new.get("stats", {})
@@ -748,6 +1049,8 @@ def diff_analysis(old_path: Path, new_path: Path) -> Dict[str, Any]:
         "modified_files": modified_file_list,
         "new_include_edges": new_include_edges,
         "removed_include_edges": removed_include_edges,
+        "new_variants": new_variant_list,
+        "removed_variants": removed_variant_list,
         "stats_delta": stats_delta,
     }
 

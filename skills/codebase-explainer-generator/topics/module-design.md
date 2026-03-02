@@ -4,15 +4,22 @@ You are a module-design subagent. Your job is to decompose a codebase into logic
 
 ## Inputs Available
 
-- `analysis.json` — file inventory, directory tree, include edges, key files, entry points
+- `analysis.json` — file inventory, directory tree, include edges, key files, entry points, **variants** (compile-time variant metadata)
 - Build system files in the workspace (Makefile, Cargo.toml, package.json, etc.)
 - Doxygen index (query via the doxygen query script path provided in your prompt)
 
 ## Procedure
 
-### Step 1: Read build system files
+### Step 1: Read build system files and variant metadata
 
-Build files define **authoritative** module boundaries. Read the primary build file:
+**First**, read the `variants` array from `analysis.json`. This contains compile-time variant information:
+- `conditional_include`: Headers that conditionally include different implementation files
+- `makefile_conditional`: Makefile `ifeq`/`else` blocks that compile different `.c` files under a `CONFIG_*` flag
+- `function_pair`: Functions with versioned names defined in different files
+
+Record all variant files. These files are **mutually exclusive at compile time** and MUST be assigned to the same module (see Step 6).
+
+**Then**, read the primary build file. Build files define **authoritative** module boundaries:
 - **Makefile/Kbuild**: Look for `obj-y +=`, `obj-$(CONFIG_*) +=` targets. Each `.o` target with a matching directory or file group is a module.
 - **Cargo.toml**: Parse `[workspace] members` for crate boundaries.
 - **package.json**: Parse `workspaces` for package boundaries.
@@ -52,9 +59,13 @@ For each module, define:
 - **dependencies**: Other modules this one depends on (with direction: uses/used-by)
 - **platform_annotations**: Mark files or subsections that are platform-specific (e.g., OS API wrappers, hardware abstraction layers)
 
-### Step 6: Classify every file
+### Step 6: Classify every file (with variant rules)
 
 Every file from `analysis.json` must appear in exactly one module. If a file doesn't fit any module, create a "common" or "utilities" module. List any unassigned files in `unassigned_files` (should be empty).
+
+**Variant file rules:**
+- Files that are compile-time alternatives (from `variants` in `analysis.json`) MUST be assigned to the **same module**. For example, `hip4.c` and `hip5.c` must both be in the same "hip-subsystem" module, even though only one is compiled at a time.
+- For each module containing variant files, add a `variant_files` field listing the variant groups. This helps downstream agents (calltrace, per-module docs) understand which files are alternatives vs. complementary.
 
 ### Step 7: Define layers and cross-module edges
 
@@ -75,6 +86,15 @@ Write `module_design.json` with this structure:
       "rationale": "Grouped because: Makefile obj target 'foo.o', dense include cluster between these 5 files",
       "dependencies": [
         {"module": "other-module", "direction": "uses", "evidence": "foo.c includes bar.h"}
+      ],
+      "variant_files": [
+        {
+          "config": "CONFIG_FEATURE_V2",
+          "alternatives": [
+            {"files": ["feature_v2.c", "feature_v2.h"], "label": "v2 (when enabled)"},
+            {"files": ["feature_v1.c", "feature_v1.h"], "label": "v1 (when disabled)"}
+          ]
+        }
       ],
       "platform_annotations": {
         "platform_specific_files": ["path/to/os_wrapper.c"],
