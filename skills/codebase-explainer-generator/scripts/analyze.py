@@ -15,16 +15,14 @@ import json
 import os
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_MODULES = 30
-MAX_FILES_PER_MODULE = 50
 MAX_KEY_FILES = 30
 MAX_ENTRY_POINTS = 30
 
@@ -319,348 +317,40 @@ def build_directory_tree(workspace: Path, max_depth: int,
 
 
 # ---------------------------------------------------------------------------
-# Module Detection
+# Include/Import Edge Extraction
 # ---------------------------------------------------------------------------
 
-def detect_modules_from_makefile(workspace: Path, files: List[Dict]) -> List[Dict]:
-    """Strategy 1: Parse Makefile obj- targets (for C/kernel modules)."""
-    modules = []
-    makefile = workspace / "Makefile"
-    if not makefile.exists():
-        return modules
-
-    content = read_head(makefile, 65536)
-    file_set = {f["name"] for f in files}
-
-    # Match obj-$(CONFIG_...) += name.o or obj-y += name.o
-    obj_pattern = re.compile(
-        r"^[\w-]*obj-[^\s]*\s*[+:]?=\s*(.+?)$", re.MULTILINE
-    )
-    for match in obj_pattern.finditer(content):
-        targets = match.group(1).strip().split()
-        for target in targets:
-            target = target.strip().rstrip("\\")
-            if not target or target.startswith("#"):
-                continue
-            # name.o → look for name.c and name.h
-            base = target.replace(".o", "")
-            if not base:
-                continue
-
-            # Check if this is a directory-based module (name/)
-            module_dir = workspace / base
-            if module_dir.is_dir():
-                dir_files = [
-                    f for f in files
-                    if f["dir"].startswith(base + "/") or f["dir"] == base + "/"
-                ]
-                if dir_files:
-                    modules.append({
-                        "name": base,
-                        "files": [f["path"] for f in dir_files[:MAX_FILES_PER_MODULE]],
-                        "line_count": sum(f["lines"] for f in dir_files),
-                        "reason": f"Makefile obj target: {base}/",
-                        "truncated": len(dir_files) > MAX_FILES_PER_MODULE,
-                    })
-                continue
-
-            # Single-file module: find matching source files
-            matched = [
-                f for f in files
-                if f["name"].startswith(base) and f["dir"] == "./"
-            ]
-            if matched:
-                modules.append({
-                    "name": base,
-                    "files": [f["path"] for f in matched[:MAX_FILES_PER_MODULE]],
-                    "line_count": sum(f["lines"] for f in matched),
-                    "reason": f"Makefile obj target: {target}",
-                    "truncated": len(matched) > MAX_FILES_PER_MODULE,
-                })
-
-    return modules
-
-
-def detect_modules_from_cargo(workspace: Path, files: List[Dict]) -> List[Dict]:
-    """Parse Cargo.toml workspace members."""
-    modules = []
-    cargo = workspace / "Cargo.toml"
-    if not cargo.exists():
-        return modules
-
-    content = read_head(cargo)
-    in_members = False
-    for line in content.split("\n"):
-        if "[workspace]" in line:
-            in_members = False
-        if "members" in line and "=" in line:
-            in_members = True
-            continue
-        if in_members:
-            m = re.match(r'\s*"([^"]+)"', line)
-            if m:
-                member = m.group(1)
-                member_files = [
-                    f for f in files
-                    if f["path"].startswith(member + "/") or f["dir"].startswith(member + "/")
-                ]
-                if member_files:
-                    modules.append({
-                        "name": member,
-                        "files": [f["path"] for f in member_files[:MAX_FILES_PER_MODULE]],
-                        "line_count": sum(f["lines"] for f in member_files),
-                        "reason": f"Cargo workspace member",
-                        "truncated": len(member_files) > MAX_FILES_PER_MODULE,
-                    })
-            if "]" in line:
-                in_members = False
-
-    return modules
-
-
-def detect_modules_from_package_json(workspace: Path, files: List[Dict]) -> List[Dict]:
-    """Parse package.json workspaces."""
-    modules = []
-    pkg = workspace / "package.json"
-    if not pkg.exists():
-        return modules
-
-    try:
-        with open(pkg) as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return modules
-
-    workspaces = data.get("workspaces", [])
-    if isinstance(workspaces, dict):
-        workspaces = workspaces.get("packages", [])
-
-    for ws in workspaces:
-        ws_clean = ws.rstrip("/*")
-        if "*" in ws_clean:
-            continue  # Skip glob patterns
-        ws_files = [f for f in files if f["path"].startswith(ws_clean + "/")]
-        if ws_files:
-            modules.append({
-                "name": ws_clean,
-                "files": [f["path"] for f in ws_files[:MAX_FILES_PER_MODULE]],
-                "line_count": sum(f["lines"] for f in ws_files),
-                "reason": "package.json workspace",
-                "truncated": len(ws_files) > MAX_FILES_PER_MODULE,
-            })
-
-    return modules
-
-
-def detect_modules_by_directory(files: List[Dict], workspace: Path) -> List[Dict]:
-    """Strategy 2: Top-level subdirectories with >3 source files."""
-    modules = []
-    dir_files: Dict[str, List[Dict]] = defaultdict(list)
+def extract_include_edges(files: List[Dict], workspace: Path) -> List[Dict[str, str]]:
+    """Extract raw include/import edges between source files (truth only, no clustering)."""
+    edges: List[Dict[str, str]] = []
+    file_names = {f["name"] for f in files}
+    file_paths = {f["path"] for f in files}
 
     for f in files:
-        parts = Path(f["path"]).parts
-        if len(parts) > 1:
-            top_dir = parts[0]
-            dir_files[top_dir].append(f)
-
-    for dirname, dfiles in sorted(dir_files.items()):
-        if len(dfiles) >= 3:
-            modules.append({
-                "name": dirname,
-                "files": [f["path"] for f in dfiles[:MAX_FILES_PER_MODULE]],
-                "line_count": sum(f["lines"] for f in dfiles),
-                "reason": f"directory cluster: {dirname}/ ({len(dfiles)} files)",
-                "truncated": len(dfiles) > MAX_FILES_PER_MODULE,
-            })
-
-    return modules
-
-
-def detect_modules_by_prefix(files: List[Dict]) -> List[Dict]:
-    """Strategy 3: File-prefix clustering for flat directory layouts."""
-    modules = []
-    # Only look at root-level files
-    root_files = [f for f in files if f["dir"] == "./"]
-    if len(root_files) < 5:
-        return modules
-
-    # Extract prefixes: take the part before first digit, underscore-delimited chunk,
-    # or the stem if short
-    prefix_groups: Dict[str, List[Dict]] = defaultdict(list)
-    for f in root_files:
-        stem = Path(f["name"]).stem
-        # Try splitting on digits: hip4.c, hip5.c → "hip"
-        m = re.match(r"^([a-zA-Z_]+?)(?:\d|_\d)", stem)
-        if m and len(m.group(1)) >= 2:
-            prefix_groups[m.group(1)].append(f)
-        else:
-            # Try splitting on underscores: sap_mlme.c, sap_ma.c → "sap"
-            parts = stem.split("_")
-            if len(parts) >= 2 and len(parts[0]) >= 2:
-                prefix_groups[parts[0]].append(f)
-
-    for prefix, pfiles in sorted(prefix_groups.items()):
-        if len(pfiles) >= 2:
-            modules.append({
-                "name": f"{prefix}-subsystem",
-                "files": [f["path"] for f in pfiles[:MAX_FILES_PER_MODULE]],
-                "line_count": sum(f["lines"] for f in pfiles),
-                "reason": f"file-prefix cluster: {prefix}*",
-                "truncated": len(pfiles) > MAX_FILES_PER_MODULE,
-            })
-
-    return modules
-
-
-def detect_modules_by_naming(files: List[Dict]) -> List[Dict]:
-    """Strategy 4: Naming conventions like scsc_wifilogger_*, nl80211_vendor*."""
-    modules = []
-    root_files = [f for f in files if f["dir"] == "./"]
-    if not root_files:
-        return modules
-
-    # Look for multi-word prefixes (compound naming)
-    compound_groups: Dict[str, List[Dict]] = defaultdict(list)
-    for f in root_files:
-        stem = Path(f["name"]).stem
-        parts = stem.split("_")
-        if len(parts) >= 3:
-            # Use first two segments as the compound prefix
-            compound = "_".join(parts[:2])
-            if len(compound) >= 4:
-                compound_groups[compound].append(f)
-
-    for compound, cfiles in sorted(compound_groups.items()):
-        if len(cfiles) >= 2:
-            modules.append({
-                "name": compound.replace("_", "-"),
-                "files": [f["path"] for f in cfiles[:MAX_FILES_PER_MODULE]],
-                "line_count": sum(f["lines"] for f in cfiles),
-                "reason": f"naming convention: {compound}_*",
-                "truncated": len(cfiles) > MAX_FILES_PER_MODULE,
-            })
-
-    return modules
-
-
-def detect_modules_by_includes(files: List[Dict], workspace: Path) -> List[Dict]:
-    """Strategy 5: Cluster by include/import relationships (flat directory fallback)."""
-    modules = []
-    root_files = [f for f in files if f["dir"] == "./"]
-    if len(root_files) < 3:
-        return modules
-
-    # Build include graph for C/C++ or import graph for Python
-    include_map: Dict[str, Set[str]] = defaultdict(set)
-    file_names = {f["name"] for f in root_files}
-
-    for f in root_files:
         content = read_head(Path(f["abs_path"]), 16384)
         # C/C++ includes
         for m in re.finditer(r'#include\s*"([^"]+)"', content):
-            included = os.path.basename(m.group(1))
-            if included in file_names:
-                include_map[f["name"]].add(included)
-                include_map[included].add(f["name"])
+            target = m.group(1)
+            target_base = os.path.basename(target)
+            # Check if the included file exists in the project
+            if target in file_paths or target_base in file_names:
+                edges.append({
+                    "from": f["path"],
+                    "to": target,
+                    "type": "include",
+                })
         # Python imports
         for m in re.finditer(r"^(?:from|import)\s+([\w.]+)", content, re.MULTILINE):
             mod_name = m.group(1).split(".")[0]
             potential = mod_name + ".py"
             if potential in file_names:
-                include_map[f["name"]].add(potential)
-                include_map[potential].add(f["name"])
+                edges.append({
+                    "from": f["path"],
+                    "to": potential,
+                    "type": "import",
+                })
 
-    # Find connected components
-    visited: Set[str] = set()
-    clusters: List[Set[str]] = []
-
-    def dfs(node: str, cluster: Set[str]):
-        cluster.add(node)
-        visited.add(node)
-        for neighbor in include_map.get(node, set()):
-            if neighbor not in visited:
-                dfs(neighbor, cluster)
-
-    for fname in include_map:
-        if fname not in visited:
-            cluster: Set[str] = set()
-            dfs(fname, cluster)
-            if len(cluster) >= 3:
-                clusters.append(cluster)
-
-    for i, cluster in enumerate(sorted(clusters, key=len, reverse=True)):
-        cluster_files = [f for f in root_files if f["name"] in cluster]
-        # Try to name the cluster from the most common prefix
-        stems = [Path(f["name"]).stem for f in cluster_files]
-        common = os.path.commonprefix(stems)
-        name = common.rstrip("_") if len(common) >= 2 else f"cluster-{i+1}"
-
-        modules.append({
-            "name": name,
-            "files": [f["path"] for f in cluster_files[:MAX_FILES_PER_MODULE]],
-            "line_count": sum(f["lines"] for f in cluster_files),
-            "reason": f"include-graph cluster ({len(cluster)} connected files)",
-            "truncated": len(cluster_files) > MAX_FILES_PER_MODULE,
-        })
-
-    return modules
-
-
-def merge_modules(all_modules: List[Dict]) -> List[Dict]:
-    """Merge overlapping modules, preferring earlier (higher priority) detections."""
-    if not all_modules:
-        return []
-
-    assigned_files: Set[str] = set()
-    merged: List[Dict] = []
-
-    for mod in all_modules:
-        # Remove files already assigned to a higher-priority module
-        remaining = [f for f in mod["files"] if f not in assigned_files]
-        if len(remaining) < 2:
-            continue
-
-        assigned_files.update(remaining)
-        merged.append({
-            "name": mod["name"],
-            "files": remaining[:MAX_FILES_PER_MODULE],
-            "line_count": mod["line_count"],
-            "reason": mod["reason"],
-            "truncated": mod.get("truncated", False) or len(remaining) > MAX_FILES_PER_MODULE,
-        })
-
-    return merged[:MAX_MODULES]
-
-
-def detect_modules(workspace: Path, files: List[Dict],
-                   build_system: str) -> Tuple[List[Dict], bool]:
-    """Run all module detection heuristics in priority order."""
-    all_modules: List[Dict] = []
-
-    # Strategy 1: Build targets
-    if build_system in ("make", "kbuild"):
-        all_modules.extend(detect_modules_from_makefile(workspace, files))
-    elif build_system == "cargo":
-        all_modules.extend(detect_modules_from_cargo(workspace, files))
-    elif build_system == "npm":
-        all_modules.extend(detect_modules_from_package_json(workspace, files))
-
-    # Strategy 2: Directory clustering
-    all_modules.extend(detect_modules_by_directory(files, workspace))
-
-    # Strategy 3: File-prefix clustering
-    all_modules.extend(detect_modules_by_prefix(files))
-
-    # Strategy 4: Naming convention
-    all_modules.extend(detect_modules_by_naming(files))
-
-    # Strategy 5: Include/import relationships (fallback)
-    if len(all_modules) < 3:
-        all_modules.extend(detect_modules_by_includes(files, workspace))
-
-    merged = merge_modules(all_modules)
-    truncated = len(all_modules) > MAX_MODULES
-    return merged, truncated
+    return edges
 
 
 # ---------------------------------------------------------------------------
@@ -881,16 +571,12 @@ def format_text(data: Dict[str, Any]) -> str:
     lines.append(f"\n--- Directory Tree ---")
     lines.append(data["directory_tree"])
 
-    lines.append(f"\n--- Modules ({len(data['modules'])}) ---")
-    if data.get("modules_truncated"):
-        lines.append(f"  (truncated to {MAX_MODULES}, more modules exist)")
-    for mod in data["modules"]:
-        lines.append(f"\n  [{mod['name']}] ({mod['line_count']:,} lines, {len(mod['files'])} files)")
-        lines.append(f"    Reason: {mod['reason']}")
-        for fp in mod["files"][:10]:
-            lines.append(f"    - {fp}")
-        if len(mod["files"]) > 10:
-            lines.append(f"    ... and {len(mod['files']) - 10} more")
+    include_edges = data.get("include_edges", [])
+    lines.append(f"\n--- Include/Import Edges ({len(include_edges)}) ---")
+    for edge in include_edges[:100]:
+        lines.append(f"  {edge['from']} --{edge['type']}--> {edge['to']}")
+    if len(include_edges) > 100:
+        lines.append(f"  ... and {len(include_edges) - 100} more edges")
 
     lines.append(f"\n--- Key Files ({len(data['key_files'])}) ---")
     for kf in data["key_files"]:
@@ -955,8 +641,8 @@ def analyze(workspace: Path, max_depth: int = 4,
     # Directory tree
     tree = build_directory_tree(workspace, max_depth, extra_excludes)
 
-    # Module detection
-    modules, modules_truncated = detect_modules(workspace, files, build_system)
+    # Include/import edges
+    include_edges = extract_include_edges(files, workspace)
 
     # Key files
     key_files = find_key_files(workspace, files, build_system)
@@ -970,6 +656,13 @@ def analyze(workspace: Path, max_depth: int = 4,
     # Existing docs
     existing_docs = find_existing_docs(workspace)
 
+    # Build files list without abs_path (internal-only field)
+    files_output = [
+        {"path": f["path"], "name": f["name"], "ext": f["ext"],
+         "dir": f["dir"], "lines": f["lines"]}
+        for f in files
+    ]
+
     return {
         "project_name": workspace.name,
         "workspace": str(workspace),
@@ -981,9 +674,9 @@ def analyze(workspace: Path, max_depth: int = 4,
             "by_extension": dict(ext_counts.most_common()),
             "by_directory": dict(dir_counts.most_common()),
         },
+        "files": files_output,
         "directory_tree": tree,
-        "modules": modules,
-        "modules_truncated": modules_truncated,
+        "include_edges": include_edges,
         "key_files": key_files,
         "entry_points": entry_points,
         "config_files": config_files,
