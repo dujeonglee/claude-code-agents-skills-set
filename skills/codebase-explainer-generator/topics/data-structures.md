@@ -55,6 +55,12 @@ Document:
    - **Platform-specific flag**: Mark fields that use platform-specific types (e.g., `spinlock_t`, `struct sk_buff *`, `HANDLE`, `pthread_mutex_t`)
    - Whether the field is a pointer to another key structure (relationship)
 4. **Lifecycle**: How instances are created, used, and destroyed (if discernible from function names like `*_alloc`, `*_init`, `*_free`, `*_destroy`)
+
+   **Lifecycle verification (MANDATORY)**: For every function name written in Lifecycle sections (e.g., `foo_alloc()`, `foo_free()`), verify it exists:
+   1. Run `python3 <doxygen-query-script> <workspace> symbol <function_name>`
+   2. If not found, run `python3 <doxygen-query-script> <workspace> search <keyword>` (e.g., search `alloc` for allocation functions)
+   3. If the function does not exist, do NOT include it. Write "lifecycle functions not confirmed via doxygen" instead.
+
 5. **Relationships**: Links to other key structures (embedded, pointed-to, array-of)
 
 ### Step 4: Build structure dependency graph

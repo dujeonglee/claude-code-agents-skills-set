@@ -22,15 +22,27 @@ Record all detected variants. You MUST trace both sides of every variant that ap
 
 ### Step 1: Identify key execution flows
 
-From `analysis.json`, find entry points (e.g., `module_init`, `main`, `__init__.py`). Select 3-8 flows that represent the most important execution paths:
+#### Step 1a: Analyze project domain
 
-- **Initialization flow**: System startup / module loading
-- **Main data path**: The primary operation the code performs (e.g., packet processing, request handling)
-- **Teardown flow**: Cleanup / shutdown
-- **Error handling flow**: How errors propagate
-- **Configuration flow**: How settings are applied (if applicable)
+Read the project's entry points, build description, and module design to determine what the project implements. Identify the project's domain (e.g., network driver, web server, compiler, database, embedded firmware).
 
-### Step 1b: Cross-check variants against flows
+#### Step 1b: Derive domain-specific flows
+
+For each key capability the project provides, trace the corresponding execution flow. Do NOT rely on a fixed generic list — derive flows from what the project actually does. Examples by domain:
+
+- **WiFi/network driver** → connection, roaming, disconnection, data TX, data RX, power management
+- **Web server** → request routing, middleware pipeline, response serialization, WebSocket lifecycle
+- **Compiler** → lexing, parsing, type checking, code generation, optimization passes
+- **Database** → query parsing, plan optimization, execution, transaction commit, WAL write
+- **Embedded firmware** → boot, peripheral init, sensor read loop, communication protocol, OTA update
+
+Target 3-8 flows, but allow more if the domain warrants it.
+
+#### Step 1c: Include initialization and teardown bookends
+
+Always include initialization (system startup / module loading) and teardown (cleanup / shutdown) flows as bookends, even if the domain-specific flows above don't naturally include them.
+
+#### Step 1d: Cross-check variants against flows
 
 For each flow identified in Step 1, check whether any function in the flow's likely call chain resides in a variant file (from Step 0). If so, this flow MUST be split into variant sub-flows.
 
@@ -275,4 +287,4 @@ When a flow has variant implementations, document each variant as a sub-flow and
 - **Every call trace step MUST have a confidence label** — `[verified: doxygen-callgraph]`, `[verified: doxygen-body]`, `[verified: source-read]`, `[unresolved: indirect-dispatch]`, or `[unresolved: incomplete-callgraph]`
 - **Read variant metadata from analysis.json FIRST** (Step 0) — missing a major variant means half the data path goes undocumented
 - For indirect dispatch (work queues, notifier chains, function pointers, timers, NAPI): follow the protocol in Step 2b. Never guess the target — trace back to the registration point.
-- **Detect variant implementations early** (Step 1b) — cross-check every flow against the variant list from Step 0
+- **Detect variant implementations early** (Step 1d) — cross-check every flow against the variant list from Step 0

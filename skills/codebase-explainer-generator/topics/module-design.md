@@ -115,11 +115,13 @@ Write `module_design.json` with this structure:
 
 ## Guidelines
 
-- Target 5-20 modules depending on codebase size
 - Every file must be assigned to exactly one module
-- Prefer build-system evidence over heuristics
+- **High cohesion, low coupling**: Group files that change together, share internal data structures, and have dense mutual include edges. Separate files that communicate only through narrow interfaces.
+- **Build-system evidence as starting point, not final answer**: Build targets suggest boundaries but must be validated. If a single build target compiles files spanning unrelated concerns, split them. If multiple build targets compile tightly-coupled files, merge them.
+- **Functional decomposition**: Each module should implement one identifiable concern or feature. If you cannot describe a module's purpose in one sentence without using "and", it should likely be split.
+- **Cross-module edge minimization**: Prefer module boundaries that minimize the number of cross-module include edges and function calls.
 - When build files are absent, rely on include clusters and naming conventions
 - Mark platform-specific code explicitly — this is critical for porting agents
 - Keep rationale concrete: cite file names, include counts, build targets
-- **Complexity bounds**: Each module should contain roughly 2-15 source files. If a proposed module would contain >15 files or >5,000 lines of implementation code (.c files), consider splitting it into sub-modules unless the files share a single cohesive API surface. A module with >8 files should have a documented reason for not splitting (e.g., "all 12 files implement the same ring-buffer API and share internal state").
+- **Complexity bounds**: If a proposed module would contain >15 files or >5,000 lines of implementation code (.c files), consider splitting it into sub-modules unless the files share a single cohesive API surface. A module with >8 files should have a documented reason for not splitting (e.g., "all 12 files implement the same ring-buffer API and share internal state").
 - **Per-module doc budget**: Downstream per-module doc subagents will scale doc size based on file count and line count. Coarser modules produce proportionally larger docs. If you want tighter, more focused docs, prefer finer module granularity.

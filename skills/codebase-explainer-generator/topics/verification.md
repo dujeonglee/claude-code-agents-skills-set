@@ -20,6 +20,7 @@ Read the documentation file and extract every verifiable factual claim:
 4. **Call relationships**: "`foo()` calls `bar()`"
 5. **Include relationships**: "`file.c` includes `header.h`"
 6. **Parameter counts/types**: "`foo()` takes 3 parameters"
+7. **Lifecycle functions**: "`struct foo` is created by `bar_alloc()`" — verify the function exists via `symbol` query
 
 Skip non-verifiable claims:
 - Architectural descriptions ("this module handles X")

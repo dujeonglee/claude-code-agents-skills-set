@@ -1,6 +1,6 @@
 # Codebase Explainer Generator
 
-**Version**: 1.0.0
+**Version**: 1.1.0
 
 Generate a tailored codebase-explainer skill for any project. Point it at a workspace and it produces architecture docs with data structure details, execution flow traces, and platform dependency annotations — optimized for consumption by porting agents.
 
@@ -106,8 +106,7 @@ Spawn **one** foreground Agent (subagent_type: general-purpose, do NOT use `run_
 
 **Wait for completion.** Read `module_design.json` and verify:
 - Every file from `analysis.json` is assigned to exactly one module
-- Module count is between 5-20
-- Each module has a rationale with evidence
+- Each module has a rationale with evidence (no arbitrary count limit)
 - `unassigned_files` is empty
 
 If issues exist, fix them directly before proceeding.
@@ -161,7 +160,8 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
    d. **Module map table**: columns: #, Module, Files, Key source files, Purpose, Porting impact. Link each module to its per-module doc.
    e. **Key data structures table**: top 10-15 structures with columns: #, Structure, Module, Fields (count), Platform dep., Purpose.
    f. **Structure ownership graph**: ASCII tree showing how key structures are nested/embedded (e.g., `slsi_dev` embeds `slsi_hip` which holds `hip_priv`). This reveals the runtime object model.
-   g. **Cross-module data flow**: For the top 3-5 flows (init, TX, RX, teardown, signaling), show function-level call chains with module boundary crossings. Format: `function() [module] --> function() [module]`. Reference calltrace.md for full traces.
+   g. **Cross-module data flow**: For the top 3-5 flows, show function-level call chains with module boundary crossings. Format: `function() [module] --> function() [module]`. Reference calltrace.md for full traces.
+      > **CRITICAL**: Copy flow summaries verbatim from calltrace.md, including module annotations. Do not re-summarize or re-attribute modules independently. Every `function() [module]` annotation must match calltrace.md exactly.
    h. **Platform dependency triage table**: module, impact level (CRITICAL/HIGH/MEDIUM/LOW/NONE), platform APIs used, porting notes. Cover ALL modules.
    i. **Porting strategy summary**: Numbered steps (5-8) for recommended porting order, starting from OS abstraction layer through to wireless framework adaptation.
    j. **Cross-module edge summary table**: All edges from `module_design.json`. Columns: #, From, To, Relationship. This is essential for understanding coupling.
@@ -179,7 +179,7 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
    - Ensure every module boundary crossing is marked
    - Include per-flow platform dependency summary tables
 
-10. **Write per-module docs `NN-<module-name>.md`**:
+10. **Write per-module docs `NN-<module-name>.md`** (with subtopic splitting for large modules):
 
     Each per-module doc must contain:
     - Module purpose and scope (1-2 paragraphs)
@@ -202,9 +202,16 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
 
     Include the target line count for each module in the subagent prompt so it can allocate space accordingly.
 
+    **Subtopic splitting**: When a module's target exceeds 400 lines, split into subtopic files instead of writing one large file:
+    - `NN-<module>-overview.md` — purpose, file inventory, dependencies, porting impact
+    - `NN-<module>-api.md` — API surface with function signatures and descriptions
+    - `NN-<module>-internals.md` — internal flow, data structures, implementation details
+    - Additional subtopics as needed (e.g., `NN-<module>-platform.md` for heavy platform-dependency sections)
+    - Per-file cap: ~400 lines. This keeps files focused and LLM-context-friendly (~10KB per file).
+
     **Batching strategy** (based on total complexity):
     - **≤8 modules**: Main agent writes all per-module docs directly.
-    - **9-20 modules**: Spawn parallel foreground subagents. Batch modules so that each subagent handles roughly equal total target lines (not equal module counts). A batch of 2 large modules (~600 target lines total) is comparable to a batch of 5 small modules (~700 target lines total). Target 3-5 batches with ~500-800 target lines each.
+    - **9+ modules**: Spawn parallel foreground subagents. Batch modules so that each subagent handles roughly equal total target lines (not equal module counts). A batch of 2 large modules (~600 target lines total) is comparable to a batch of 5 small modules (~700 target lines total). Target 3-5 batches with ~500-800 target lines each. Account for subtopic files when estimating batch sizes — a module that splits into 3 subtopic files produces more output than a single-file module.
 
     Per-module doc subagent prompt (substitute all `$VARIABLES` and `<BATCH_LIST>`):
     > You are a per-module documentation subagent. Your job is to write detailed per-module documentation files.
@@ -213,6 +220,8 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
     > - module-1 (N files, ~N lines): target ~N lines
     > - module-2 (N files, ~N lines): target ~N lines
     > ... (substitute actual values from module_design.json and the size scaling formula)
+    >
+    > **Subtopic splitting**: If a module's target exceeds 400 lines, split into subtopic files: `NN-<module>-overview.md`, `NN-<module>-api.md`, `NN-<module>-internals.md`, etc. Each file should be ~400 lines max.
     >
     > Inputs:
     > - Module design: `$OUTPUT_DIR/module_design.json` — read this for module definitions, file assignments, rationale, and cross-module edges
@@ -224,7 +233,7 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
     >   Usage: `python3 $DOXYGEN_DIR/scripts/query.py $WORKSPACE <command> [args]`
     >   Use `file <path>` to get symbols defined in each file. Use `symbol <name>` for function details.
     >
-    > For each module in your batch, write `$OUTPUT_DIR/NN-<module-name>.md` containing: module purpose (1-2 paragraphs), file inventory with one-line purposes, key data structures with platform annotations, API surface with function signatures, internal flow with ASCII diagrams where helpful, dependencies (uses/used-by), and porting impact classification (HIGH/MEDIUM/LOW/NONE with rationale).
+    > For each module in your batch, write `$OUTPUT_DIR/NN-<module-name>.md` (or subtopic files if target >400 lines) containing: module purpose (1-2 paragraphs), file inventory with one-line purposes, key data structures with platform annotations, API surface with function signatures, internal flow with ASCII diagrams where helpful, dependencies (uses/used-by), and porting impact classification (HIGH/MEDIUM/LOW/NONE with rationale).
     >
     > Use doxygen queries to verify function signatures and symbol locations — do not guess.
 
@@ -256,9 +265,9 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
     - ...
 
     ## Source
+    - **Generator version**: <version from top of generator SKILL.md>
     - **Target workspace**: <absolute path to $WORKSPACE>
     - **Generator skill**: <absolute path to $SKILL_DIR>
-    - **Generator version**: <version from top of generator SKILL.md>
     - **Doxygen skill**: <absolute path to $DOXYGEN_DIR>
     - **Generated from**: codebase-explainer-generator
     - **Generated date**: <YYYY-MM-DD>
@@ -464,8 +473,8 @@ Spawn **one foreground Agent per documentation file** in parallel (subagent_type
     - Remove `*-draft.md` files
     - Remove `verification-*.json` files (their corrections are applied)
 
-15. **Check file sizes**: Each doc must be under 100KB. If any exceeds this:
-    - Split into sub-module docs (e.g., `02a-module-core.md`, `02b-module-transport.md`)
+15. **Check file sizes**: Each doc should be under ~400 lines (~10KB). If any exceeds this:
+    - Split into subtopic files (e.g., `02-module-overview.md`, `02-module-api.md`, `02-module-internals.md`)
 
 16. **Report results** to the user:
     - List all files created with sizes
@@ -480,15 +489,18 @@ Spawn **one foreground Agent per documentation file** in parallel (subagent_type
 
 ```
 $WORKSPACE/.claude/skills/<project>-explainer/
-├── 00-index.md          # Architecture overview + platform dependency triage table
-├── data-structures.md   # All key types with platform-specific field annotations
-├── calltrace.md         # Execution flows with data mutations + platform calls
-├── 01-<module>.md       # Per-module: files, APIs, platform impact classification
-├── 02-<module>.md
+├── 00-index.md                  # Architecture overview + platform dependency triage table
+├── data-structures.md           # All key types with platform-specific field annotations
+├── calltrace.md                 # Execution flows with data mutations + platform calls
+├── 01-<module>.md               # Per-module doc (small modules, ≤400 lines)
+├── 02-<module>-overview.md      # Per-module subtopic: purpose, files, dependencies
+├── 02-<module>-api.md           # Per-module subtopic: API surface
+├── 02-<module>-internals.md     # Per-module subtopic: internal flow, data structures
+├── 03-<module>.md
 ├── ...
-├── analysis.json        # Raw analysis data (truth from script)
-├── module_design.json   # Module decomposition with rationale (from subagent)
-└── SKILL.md             # Generated explainer skill definition
+├── analysis.json                # Raw analysis data (truth from script)
+├── module_design.json           # Module decomposition with rationale (from subagent)
+└── SKILL.md                     # Generated explainer skill definition
 ```
 
 Key porting-agent features in every doc:
@@ -504,10 +516,10 @@ Key porting-agent features in every doc:
 | Codebase Size | Files | Modules to Doc | Output Files |
 |---------------|-------|----------------|--------------|
 | Tiny          | <20   | Skip per-module | 4 (index + data-structures + calltrace + SKILL.md) |
-| Small         | 20-50 | 3-5 modules    | 7-9 |
-| Medium        | 50-200| 5-12 modules   | 9-16 |
-| Large         | 200-500| 10-20 modules | 14-24 |
-| Very large    | 500+  | 15-20 max      | 19-24 |
+| Small         | 20-50 | ~3-5 modules   | 7-9 |
+| Medium        | 50-200| ~5-12 modules  | 9-16 |
+| Large         | 200-500| ~10-20 modules | 14-24 |
+| Very large    | 500+  | 15+ modules    | 19+ |
 
 ---
 
@@ -518,7 +530,7 @@ Key porting-agent features in every doc:
 - **Each subagent reads its topic file** — the topic files in `topics/` are the full instructions. The spawn prompt just points the subagent to the file and provides input paths.
 - **Verification catches hallucinations** — always run Phase 5. The verification subagent compares claims against doxygen evidence, which is the only reliable way to catch fabricated symbol names or wrong call relationships.
 - **Platform annotations are the primary value** — every table, every struct field, every function call should be annotated with platform dependency information. This is what makes the output useful for porting agents.
-- **Cap each doc at 100KB** — split further if needed.
+- **Cap each doc at ~400 lines** (~10KB) — split into subtopic files if needed.
 - **Prefer ASCII diagrams over prose** for data flows and layer architectures.
 - **Cross-reference between docs** — use relative links like `[data structures](data-structures.md)`.
 - **All file-writing subagents must run in foreground** — never use `run_in_background: true` for agents that write files. Background agents cannot prompt the user for Write permission and will silently fail. Only use background agents for read-only research.
