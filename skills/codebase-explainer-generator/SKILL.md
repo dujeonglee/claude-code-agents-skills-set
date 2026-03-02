@@ -188,14 +188,29 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
     - Dependencies: which modules this one uses and which depend on it
     - **Porting impact classification**: HIGH / MEDIUM / LOW / NONE with rationale
 
-    **Batching strategy** (based on module count):
+    **Size scaling rule**: Each per-module doc's target length should be proportional to the module's complexity. Use this formula:
+
+        target_lines = 120 + (file_count × 15) + (total_lines ÷ 200)
+
+    For example:
+    - 2-file module (~1,000 lines): target ~140 lines
+    - 5-file module (~3,000 lines): target ~210 lines
+    - 10-file module (~8,000 lines): target ~310 lines
+    - 15-file module (~15,000 lines): target ~420 lines
+
+    Include the target line count for each module in the subagent prompt so it can allocate space accordingly.
+
+    **Batching strategy** (based on total complexity):
     - **≤8 modules**: Main agent writes all per-module docs directly.
-    - **9-20 modules**: Spawn parallel foreground subagents, each handling a batch of 5-6 modules. Each subagent receives the full context needed to write quality docs independently.
+    - **9-20 modules**: Spawn parallel foreground subagents. Batch modules so that each subagent handles roughly equal total target lines (not equal module counts). A batch of 2 large modules (~600 target lines total) is comparable to a batch of 5 small modules (~700 target lines total). Target 3-5 batches with ~500-800 target lines each.
 
     Per-module doc subagent prompt (substitute all `$VARIABLES` and `<BATCH_LIST>`):
     > You are a per-module documentation subagent. Your job is to write detailed per-module documentation files.
     >
-    > Write docs for these modules: <BATCH_LIST, e.g. "modules 1-5: networking, core, config, protocol, utils">
+    > Write docs for these modules with target sizes:
+    > - module-1 (N files, ~N lines): target ~N lines
+    > - module-2 (N files, ~N lines): target ~N lines
+    > ... (substitute actual values from module_design.json and the size scaling formula)
     >
     > Inputs:
     > - Module design: `$OUTPUT_DIR/module_design.json` — read this for module definitions, file assignments, rationale, and cross-module edges
