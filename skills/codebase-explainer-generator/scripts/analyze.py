@@ -8,6 +8,7 @@ Usage:
     python3 analyze.py <workspace> [options]
     python3 analyze.py /path/to/project --format json --output analysis.json
     python3 analyze.py /path/to/project --format text
+    python3 analyze.py diff <old_analysis.json> <new_analysis.json> [--output changes.json]
 """
 
 import argparse
@@ -685,29 +686,93 @@ def analyze(workspace: Path, max_depth: int = 4,
 
 
 # ---------------------------------------------------------------------------
+# Diff Analysis
+# ---------------------------------------------------------------------------
+
+def diff_analysis(old_path: Path, new_path: Path) -> Dict[str, Any]:
+    """Compare two analysis.json files and produce a structured delta.
+
+    Returns a dict with new/deleted/modified files, edge changes, and stats delta.
+    """
+    with open(old_path, "r", encoding="utf-8") as f:
+        old = json.load(f)
+    with open(new_path, "r", encoding="utf-8") as f:
+        new = json.load(f)
+
+    # Build file lookup by path
+    old_files = {f["path"]: f for f in old.get("files", [])}
+    new_files = {f["path"]: f for f in new.get("files", [])}
+
+    old_paths = set(old_files.keys())
+    new_paths = set(new_files.keys())
+
+    # New, deleted, modified files
+    new_file_list = [
+        {"path": p, "lines": new_files[p]["lines"]}
+        for p in sorted(new_paths - old_paths)
+    ]
+    deleted_file_list = [
+        {"path": p, "lines": old_files[p]["lines"]}
+        for p in sorted(old_paths - new_paths)
+    ]
+    modified_file_list = [
+        {"path": p, "old_lines": old_files[p]["lines"], "new_lines": new_files[p]["lines"]}
+        for p in sorted(old_paths & new_paths)
+        if old_files[p]["lines"] != new_files[p]["lines"]
+    ]
+
+    # Edge differences
+    old_edges = {(e["from"], e["to"], e["type"]) for e in old.get("include_edges", [])}
+    new_edges = {(e["from"], e["to"], e["type"]) for e in new.get("include_edges", [])}
+
+    new_include_edges = [
+        {"from": e[0], "to": e[1], "type": e[2]}
+        for e in sorted(new_edges - old_edges)
+    ]
+    removed_include_edges = [
+        {"from": e[0], "to": e[1], "type": e[2]}
+        for e in sorted(old_edges - new_edges)
+    ]
+
+    # Stats delta
+    old_stats = old.get("stats", {})
+    new_stats = new.get("stats", {})
+    stats_delta = {
+        "total_files": new_stats.get("total_files", 0) - old_stats.get("total_files", 0),
+        "total_lines": new_stats.get("total_lines", 0) - old_stats.get("total_lines", 0),
+    }
+
+    return {
+        "new_files": new_file_list,
+        "deleted_files": deleted_file_list,
+        "modified_files": modified_file_list,
+        "new_include_edges": new_include_edges,
+        "removed_include_edges": removed_include_edges,
+        "stats_delta": stats_delta,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Analyze a codebase for architecture documentation generation."
-    )
-    parser.add_argument("workspace", help="Path to the workspace to analyze")
-    parser.add_argument("--format", choices=["json", "text"], default="json",
-                        help="Output format (default: json)")
-    parser.add_argument("--max-depth", type=int, default=4,
-                        help="Directory tree depth (default: 4)")
-    parser.add_argument("--exclude", nargs="*", default=[],
-                        help="Extra directories to exclude")
-    parser.add_argument("--language", default="auto",
-                        choices=["c", "c++", "python", "java", "go", "rust",
-                                 "js", "ts", "ruby", "swift", "shell", "auto"],
-                        help="Override language detection (default: auto)")
-    parser.add_argument("--output", help="Write output to file instead of stdout")
+def _run_diff(args):
+    """Handle the 'diff' subcommand."""
+    delta = diff_analysis(Path(args.old_analysis), Path(args.new_analysis))
+    output = json.dumps(delta, indent=2, ensure_ascii=False)
+    if args.output:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(output)
+        print(f"Diff written to {out_path}", file=sys.stderr)
+    else:
+        print(output)
 
-    args = parser.parse_args()
+
+def _run_analyze(args):
+    """Handle the 'analyze' subcommand (or default invocation)."""
     workspace = Path(args.workspace)
-
     data = analyze(
         workspace,
         max_depth=args.max_depth,
@@ -728,6 +793,39 @@ def main():
         print(f"Analysis written to {out_path}", file=sys.stderr)
     else:
         print(output)
+
+
+def main():
+    # Check if first positional arg is 'diff'; otherwise fall back to
+    # original single-parser CLI for backwards compatibility.
+    if len(sys.argv) >= 2 and sys.argv[1] == "diff":
+        parser = argparse.ArgumentParser(
+            prog="analyze.py diff",
+            description="Compare two analysis.json files and output the delta.",
+        )
+        parser.add_argument("old_analysis", help="Path to the old analysis.json")
+        parser.add_argument("new_analysis", help="Path to the new analysis.json")
+        parser.add_argument("--output", help="Write output to file instead of stdout")
+        args = parser.parse_args(sys.argv[2:])
+        _run_diff(args)
+    else:
+        parser = argparse.ArgumentParser(
+            description="Analyze a codebase for architecture documentation generation."
+        )
+        parser.add_argument("workspace", help="Path to the workspace to analyze")
+        parser.add_argument("--format", choices=["json", "text"], default="json",
+                            help="Output format (default: json)")
+        parser.add_argument("--max-depth", type=int, default=4,
+                            help="Directory tree depth (default: 4)")
+        parser.add_argument("--exclude", nargs="*", default=[],
+                            help="Extra directories to exclude")
+        parser.add_argument("--language", default="auto",
+                            choices=["c", "c++", "python", "java", "go", "rust",
+                                     "js", "ts", "ruby", "swift", "shell", "auto"],
+                            help="Override language detection (default: auto)")
+        parser.add_argument("--output", help="Write output to file instead of stdout")
+        args = parser.parse_args()
+        _run_analyze(args)
 
 
 if __name__ == "__main__":

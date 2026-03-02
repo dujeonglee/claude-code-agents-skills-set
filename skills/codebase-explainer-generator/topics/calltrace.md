@@ -20,6 +20,36 @@ From `analysis.json`, find entry points (e.g., `module_init`, `main`, `__init__.
 - **Error handling flow**: How errors propagate
 - **Configuration flow**: How settings are applied (if applicable)
 
+### Step 1b: Detect variant implementations
+
+Before tracing, check whether any core subsystem has **compile-time or runtime variants** — alternative implementations of the same functionality selected by `#ifdef`, config flags, or function pointers. These are common in drivers (e.g., protocol v1 vs v2, USB vs PCIe backends, legacy vs optimized paths).
+
+**How to detect variants:**
+
+1. **Check for conditional includes** in umbrella headers. Read headers referenced by many files and look for patterns like:
+   ```c
+   #ifdef CONFIG_FEATURE_V2
+   #include "feature_v2.h"
+   #else
+   #include "feature_v1.h"
+   #endif
+   ```
+
+2. **Check for duplicate function names** across files. Query doxygen for key functions in the data path and check if the same symbol is defined in multiple files:
+   ```bash
+   python3 <doxygen-query-script> <workspace> search <function_name>
+   ```
+   If `transport_init` appears in both `transport_v1.c` and `transport_v2.c`, these are variant implementations.
+
+3. **Check `module_design.json`** for modules with names suggesting versioned variants (e.g., files named `*v1*`/`*v2*`, `*legacy*`/`*new*` within the same module).
+
+**When variants are found:**
+
+- Document **each variant as a separate sub-flow** within the same flow. For example, if the TX data path has v1 and v2 transport variants, create "Flow 3a: TX Data Path (transport-v1)" and "Flow 3b: TX Data Path (transport-v2)".
+- Note the **selection mechanism** (compile-time `#ifdef`, runtime config check, function pointer dispatch).
+- Highlight **architectural differences** between variants (e.g., buffer management, queue structure, DMA vs copy).
+- A **comparison table** after the variant sub-flows summarizing key differences is highly valuable for porting agents.
+
 ### Step 2: Trace each flow via doxygen
 
 For each flow, start from the entry point and trace the call chain:
@@ -119,6 +149,35 @@ Write your findings as structured markdown for inclusion in `calltrace.md`:
 | hal | core | `notify_ready()` | hal calls back to core |
 ```
 
+### Per-variant-flow format (when variants exist):
+
+When a flow has variant implementations, document each variant as a sub-flow and add a comparison table:
+
+```markdown
+### Flow 3: TX Data Path
+
+**Variants**: transport-v1 (`transport_v1.c`) and transport-v2 (`transport_v2.c`), selected at compile time via `CONFIG_TRANSPORT_V2`
+
+#### Flow 3a: TX Data Path (transport-v1)
+
+**Entry point**: `transmit_frame()` in `transport_v1.c`
+...full call trace...
+
+#### Flow 3b: TX Data Path (transport-v2)
+
+**Entry point**: `transmit_frame()` in `transport_v2.c`
+...full call trace...
+
+#### Variant Comparison
+
+| Aspect | transport-v1 | transport-v2 | Porting Impact |
+|--------|-------------|-------------|----------------|
+| Buffer handling | Copy to shared pool | DMA zero-copy | Different memory model |
+| Queue depth | 256 | 2048 | Config difference |
+| Signal format | Fixed-size header | TLV (variable-length) | Protocol change |
+| ...    | ...         | ...         | ...            |
+```
+
 ## Guidelines
 
 - Focus on flows that reveal architecture, not every possible code path
@@ -128,3 +187,4 @@ Write your findings as structured markdown for inclusion in `calltrace.md`:
 - Keep traces to 5-15 steps; summarize deeper levels
 - If doxygen callgraph is incomplete (e.g., function pointers), note this and trace manually by reading function bodies
 - Classify confidence: "traced via doxygen callgraph" vs "manually traced from source"
+- **Detect variant implementations early** (Step 1b) — missing a major variant means half the data path goes undocumented. When in doubt, search for duplicate function names across files.

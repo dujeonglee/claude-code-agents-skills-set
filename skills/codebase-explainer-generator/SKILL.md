@@ -23,6 +23,7 @@ Generate a tailored codebase-explainer skill for any project. Point it at a work
 ### analyze.py — Codebase Data Gathering (truth only)
 
 ```bash
+# Analyze a codebase
 python3 scripts/analyze.py <workspace> [options]
 
 Options:
@@ -31,9 +32,14 @@ Options:
   --exclude <dirs>       Extra directories to exclude
   --language <lang>      Override auto-detection (c|c++|python|java|go|rust|js|ts|auto)
   --output <path>        Write to file instead of stdout
+
+# Compare two analysis snapshots (for incremental updates)
+python3 scripts/analyze.py diff <old_analysis.json> <new_analysis.json> [--output changes.json]
 ```
 
-**Output**: Structured JSON with file inventory, directory tree, include edges, key files, entry points, and config files. No module detection — that is done by the module-design subagent. No external dependencies — pure Python 3.8+.
+**Output (analyze)**: Structured JSON with file inventory, directory tree, include edges, key files, entry points, and config files. No module detection — that is done by the module-design subagent. No external dependencies — pure Python 3.8+.
+
+**Output (diff)**: Structured JSON delta with new/deleted/modified files, new/removed include edges, and stats delta. Used by the incremental-update subagent to determine which docs need regeneration.
 
 ### doxygen-generator — Symbol-level truth
 
@@ -181,7 +187,7 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
     Per-module doc subagent prompt (substitute all `$VARIABLES` and `<BATCH_LIST>`):
     > You are a per-module documentation subagent. Your job is to write detailed per-module documentation files.
     >
-    > Write docs for these modules: <BATCH_LIST, e.g. "modules 1-5: hip-transport, device-core, management, signaling-mlme, sap-layer">
+    > Write docs for these modules: <BATCH_LIST, e.g. "modules 1-5: networking, core, config, protocol, utils">
     >
     > Inputs:
     > - Module design: `$OUTPUT_DIR/module_design.json` — read this for module definitions, file assignments, rationale, and cross-module edges
@@ -206,6 +212,7 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
     - how does <project> work
     - <project> architecture
     - what does <module> do in <project>
+    - update <project> docs
 
     ## Module Map
     | Module | Files | Doc | Purpose | Porting Impact |
@@ -225,8 +232,88 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
 
     ## Source
     - **Target workspace**: <absolute path to $WORKSPACE>
+    - **Generator skill**: <absolute path to $SKILL_DIR>
+    - **Doxygen skill**: <absolute path to $DOXYGEN_DIR>
     - **Generated from**: codebase-explainer-generator
     - **Generated date**: <YYYY-MM-DD>
+
+    ## Incremental Update
+
+    When the target codebase changes, update only the affected documentation instead of regenerating everything.
+
+    **Trigger phrases**: "update <project> docs", "refresh documentation", "sync docs with code changes"
+
+    ### U1: Change Detection
+
+    1. Note the **Generated date** from the Source section above.
+    2. Check for code changes since that date:
+       ```bash
+       cd $WORKSPACE
+       git log --after="<Generated date>" --name-only --pretty=format: | sort -u
+       ```
+    3. Re-run the analysis script to get current state:
+       ```bash
+       cp $OUTPUT_DIR/analysis.json $OUTPUT_DIR/analysis_old.json
+       python3 $SKILL_DIR/scripts/analyze.py $WORKSPACE --format json --output $OUTPUT_DIR/analysis.json
+       ```
+    4. Compute the delta:
+       ```bash
+       python3 $SKILL_DIR/scripts/analyze.py diff $OUTPUT_DIR/analysis_old.json $OUTPUT_DIR/analysis.json --output $OUTPUT_DIR/changes.json
+       ```
+    5. Read `changes.json`. If no changes detected, report "Documentation is up to date" and stop.
+
+    ### U2: Impact Analysis
+
+    Spawn **one** foreground Agent (subagent_type: general-purpose) with this prompt:
+
+    > You are an incremental-update subagent. Read the topic skill file at `$SKILL_DIR/topics/incremental-update.md` for your full instructions.
+    >
+    > Inputs:
+    > - Change summary: `$OUTPUT_DIR/changes.json`
+    > - Module design: `$OUTPUT_DIR/module_design.json`
+    > - Current analysis: `$OUTPUT_DIR/analysis.json`
+    > - Workspace: `$WORKSPACE`
+    > - Doxygen query script: `$DOXYGEN_DIR/scripts/query.py`
+    >   Usage: `python3 $DOXYGEN_DIR/scripts/query.py $WORKSPACE <command> [args]`
+    >
+    > Output: Write `$OUTPUT_DIR/update_plan.json`
+
+    Wait for completion. Read `update_plan.json`.
+
+    If `estimated_scope` is `"full"`, recommend full regeneration using the generator skill and stop.
+
+    ### U3: Module Design Update
+
+    If `update_plan.json` has entries in `module_design_updates`:
+    1. If `new_module_needed` is true, spawn the module-design subagent (same as Phase 2 of the generator) to reassign files
+    2. Otherwise, apply file assignments directly: update `module_design.json` to add new file assignments and remove deleted files
+
+    ### U4: Selective Doc Regeneration
+
+    For each doc in `docs_to_regenerate`:
+    1. Re-run the appropriate subagent for that module's per-module doc (same prompt as Phase 4 per-module subagents, but only for the affected modules)
+    2. If `regenerate_data_structures` is true, re-run the data-structures subagent (Phase 3)
+    3. If `regenerate_calltrace` is true, re-run the calltrace subagent (Phase 3)
+    4. If `regenerate_index` is true, rewrite `00-index.md` (Phase 4 step 7)
+    5. If `regenerate_skill_md` is true, rewrite `SKILL.md` module map table
+
+    Use the generator skill's topic files and subagent prompts — they are the same as in the initial generation.
+
+    ### U5: Selective Verification
+
+    Run verification subagents (Phase 5) only for the regenerated docs, not the entire set.
+
+    ### U6: Apply Corrections
+
+    Same as Phase 6 of the generator — apply HIGH/MEDIUM confidence corrections from verification.
+
+    ### U7: Finalize
+
+    1. Update `analysis.json` (already done in U1)
+    2. Update `module_design.json` if files were reassigned
+    3. Update `Generated date` in this `SKILL.md` to today's date
+    4. Clean up: remove `analysis_old.json`, `changes.json`, `update_plan.json`, draft files, verification files
+    5. Report to user: list of changed files, affected modules, docs regenerated, verification results
     ```
 
 **Report progress**: Tell the user — "Phase 4 complete. {file_count} documentation files written." List each file with its size.
