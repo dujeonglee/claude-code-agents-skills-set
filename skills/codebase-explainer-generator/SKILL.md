@@ -1,5 +1,7 @@
 # Codebase Explainer Generator
 
+**Version**: 1.0.0
+
 Generate a tailored codebase-explainer skill for any project. Point it at a workspace and it produces architecture docs with data structure details, execution flow traces, and platform dependency annotations — optimized for consumption by porting agents.
 
 ## Triggers
@@ -153,7 +155,7 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
 
 7. **Write `00-index.md`** — Architecture Overview. This is the most important doc — it must be comprehensive enough to serve as a standalone porting reference. Target **250-400 lines**. Include ALL of the following sections:
 
-   a. **Project summary table**: name, language, build system, scale (files/lines/symbols), entry points
+   a. **Project summary table**: name, language, build system, scale (files/lines/symbols), entry points. Include a **Generator version** row with the version from the top of this SKILL.md (e.g., `1.0.0`).
    b. **Layer diagram (ASCII)**: Multi-layer architecture with file annotations in each box. Show which modules belong to each layer and list key source files per layer box. Use at least 5-8 layers for non-trivial codebases.
    c. **Signal/data flow summary**: 3-5 sentences explaining how data flows top-to-bottom through the layers.
    d. **Module map table**: columns: #, Module, Files, Key source files, Purpose, Porting impact. Link each module to its per-module doc.
@@ -256,6 +258,7 @@ Using `analysis.json`, `module_design.json`, and the two draft files, write the 
     ## Source
     - **Target workspace**: <absolute path to $WORKSPACE>
     - **Generator skill**: <absolute path to $SKILL_DIR>
+    - **Generator version**: <version from top of generator SKILL.md>
     - **Doxygen skill**: <absolute path to $DOXYGEN_DIR>
     - **Generated from**: codebase-explainer-generator
     - **Generated date**: <YYYY-MM-DD>
