@@ -1,0 +1,300 @@
+================================================================================
+  Kernel Function Call Trace Analysis Skill — Requirements
+================================================================================
+
+--------------------------------------------------------------------------------
+1. Overview
+--------------------------------------------------------------------------------
+
+This skill analyzes kernel function call traces for WiFi driver stacks, tracing
+execution flows from the kernel standard interface down to firmware (top-down)
+and back (bottom-up). It identifies per-function responsibilities, lock
+relationships, and execution context transitions — including deferred or
+asynchronous paths such as NAPI, workqueues, and tasklets.
+
+
+--------------------------------------------------------------------------------
+2. Analysis Scope
+--------------------------------------------------------------------------------
+
+2.1 Input Artifacts
+-------------------
+- Call trace text in any of the following formats:
+    - ftrace / function_graph output
+    - dmesg kernel log with stack traces
+    - perf call graph output
+    - Manually written pseudo call traces
+- Analysis direction (configurable):
+    - Top-down  : Kernel standard interface → Driver → HAL → Firmware
+    - Bottom-up : Firmware event → HAL → Driver → Kernel
+    - Bidirectional: Both directions simultaneously
+
+
+2.2 Layer Hierarchy
+-------------------
+
+  [Kernel Standard Interface]   cfg80211 ops, mac80211 ops, .ndo_* callbacks
+            |
+            v
+  [Driver Entry Points]         cfg80211_ops, ieee80211_ops, netdev_ops
+            |
+            v
+  [Driver Internal Logic]       Internal function chains, state machines
+            |
+            v
+  [HW Abstraction Layer]        HAL / HIF layer
+            |
+            v
+  [Firmware Interface]          FW command / event interface
+
+
+--------------------------------------------------------------------------------
+3. Core Analysis Requirements
+--------------------------------------------------------------------------------
+
+R1. Function Call Order Identification
+---------------------------------------
+- List all functions in caller → callee order along the trace.
+- Explicitly mark layer boundaries (which layer transitions to which).
+- Distinguish lateral calls (within the same layer) from cross-layer calls.
+- For bottom-up direction, reverse the chain and annotate accordingly.
+
+
+R2. Execution Context Tracking
+--------------------------------
+- Annotate every function with its execution context:
+    - process context
+    - softirq (NET_RX_SOFTIRQ / NET_TX_SOFTIRQ)
+    - hardirq (ISR)
+    - tasklet
+    - workqueue (identify thread name where possible)
+    - NAPI poll
+
+- Identify every context transition point and trace its scheduling path.
+
+  Examples:
+    - napi_schedule()      → softirq NET_RX_SOFTIRQ → net_rx_action → napi_poll
+    - schedule_work()      → workqueue worker thread → work function
+    - tasklet_schedule()   → softirq → tasklet_action → handler
+
+
+R2-EXT. Deferred / Asynchronous Context Linkage  [*** KEY REQUIREMENT ***]
+----------------------------------------------------------------------------
+When a call trace that TRIGGERS deferred execution is physically separate from
+the call trace that ACTUALLY EXECUTES the deferred work, the two must be
+explicitly linked in the analysis output.
+
+This is the most challenging aspect of context tracking. Mechanisms such as
+NAPI, workqueues, and tasklets split the "trigger site" from the "execution
+site" across different call traces, different contexts, and sometimes different
+kernel threads. The skill prompt must handle this linkage explicitly.
+
+Linkage rules:
+
+  (a) TAG the trigger site as the ORIGIN of the deferred execution.
+      Record:
+        - The function that schedules the deferred work
+          (e.g., napi_schedule, schedule_work, tasklet_schedule)
+        - The data structure carrying the deferred context
+          (e.g., struct napi_struct, struct work_struct, struct tasklet_struct)
+        - The execution context at trigger time (e.g., hardirq / softirq)
+
+  (b) TAG the execution site with a BACK-REFERENCE to the origin.
+      Record:
+        - The deferred entry point (e.g., driver_poll, work_handler)
+        - The execution context at run time (e.g., softirq, process context)
+        - A reference back to the origin function and trigger context
+
+  (c) CONNECT the two sites in all output artifacts:
+        - Sequence diagrams: use a dashed arrow labeled with the scheduling
+          mechanism (e.g., "scheduled via napi_schedule [hardirq → softirq]")
+        - Function table: cross-reference origin and execution rows by ID
+        - Context transition summary: list all deferred pairs explicitly
+
+  Concrete example (NAPI RX path):
+
+    TRIGGER SITE (hardirq context):
+      driver_isr()
+        └── napi_schedule(&priv->napi)        ← ORIGIN tag: NAPI#RX
+              [raises NET_RX_SOFTIRQ]
+
+    EXECUTION SITE (softirq context):
+      net_rx_action()                          ← BACK-REF: NAPI#RX
+        └── napi_poll()
+              └── driver_poll()
+                    └── driver_rx_process()
+
+    Linkage annotation:
+      "driver_poll() is the execution site of NAPI#RX,
+       originally scheduled by driver_isr() → napi_schedule() in hardirq context"
+
+  Additional mechanisms requiring the same linkage treatment:
+    - schedule_work() / schedule_delayed_work() → workqueue handler
+    - tasklet_schedule()                         → tasklet handler
+    - ieee80211_queue_work()                     → mac80211 workqueue
+    - cfg80211_sched_scan_results()              → nl80211 event path
+
+
+R3. Lock Relationship Analysis
+--------------------------------
+- Identify every lock acquired and released within each function:
+    - spin_lock / spin_lock_irqsave / spin_lock_bh
+    - mutex_lock
+    - rcu_read_lock
+    - rtnl_lock
+    - wiphy_lock (cfg80211)
+    - local->mtx (mac80211)
+    - any driver-private locks
+
+- Track lock nesting order across the entire call trace.
+    - Flag any potential deadlock patterns (lock ordering violations).
+
+- Annotate lock scope:
+    - Which function acquires the lock.
+    - Which function releases the lock.
+    - Whether the scope crosses a context boundary (dangerous).
+
+- Validate context-appropriate lock usage:
+    - Sleeping locks (mutex) must not be held in softirq / hardirq context.
+    - spin_lock (non-BH) must not be used where softirq can preempt.
+
+
+R4. Per-Function Responsibility Analysis
+-----------------------------------------
+- Provide a one-line summary of each function's core responsibility.
+- Evaluate whether layer separation is clean:
+    - Flag layer skipping (e.g., driver calling cfg80211 internals directly).
+    - Flag reverse dependencies (lower layer calling upper layer directly).
+- Flag any anomalous patterns such as:
+    - Unexpected context (e.g., sleeping in atomic context).
+    - Lock held across a scheduling point.
+    - FW command issued from hardirq context without deferral.
+
+
+--------------------------------------------------------------------------------
+4. Output Format Requirements
+--------------------------------------------------------------------------------
+
+O1. Call Trace Flow Diagram (Mermaid)
+--------------------------------------
+- Render as a Mermaid sequenceDiagram or flowchart.
+- Use swim lanes to separate execution contexts
+  (e.g., hardirq lane, softirq lane, process context lane).
+- Context transitions drawn as dashed arrows.
+- Deferred execution linkage (R2-EXT) shown as dashed arrow annotated with
+  the scheduling mechanism and context change.
+  Example:
+    hardirq --(napi_schedule)--> softirq  [dashed, labeled "NET_RX_SOFTIRQ"]
+- Lock acquire/release annotated inline on the relevant function.
+
+
+O2. Function Analysis Table
+-----------------------------
+Column layout:
+
+  | # | Function | Layer | Context | Locks Acquired | Responsibility | Notes |
+
+- Cross-reference deferred pairs with a shared tag ID (e.g., NAPI#RX, WQ#SCAN).
+- Flag any anomalies in the Notes column.
+
+
+O3. Context Transition Summary
+--------------------------------
+List all context transition points in the analyzed trace:
+
+  | Trigger Function | Trigger Context | Mechanism      | Execution Entry  | Execution Context | Tag ID  |
+  |------------------|-----------------|----------------|------------------|-------------------|---------|
+  | driver_isr       | hardirq         | napi_schedule  | driver_poll      | softirq           | NAPI#RX |
+  | driver_event_isr | hardirq         | schedule_work  | driver_fw_worker | process           | WQ#FW   |
+
+
+O4. Lock Dependency Graph
+--------------------------
+- Represent lock acquisition order as a directed graph.
+- Detect and highlight any cycles (potential deadlock).
+- Annotate edges with the functions that perform the acquisition.
+
+
+--------------------------------------------------------------------------------
+5. Skill Trigger Conditions
+--------------------------------------------------------------------------------
+
+The skill should activate when the user's input matches any of the following:
+
+- Input text contains structured call trace patterns:
+    - Indented function chains with → or └── characters
+    - ftrace-style "funcA() { funcB() }" notation
+    - Numeric offset notation: "funcA+0x40/0x80"
+
+- Explicit analysis requests such as:
+    - "analyze this call trace"
+    - "trace the lock relationships"
+    - "explain the NAPI flow"
+    - "what context is this running in"
+    - "map the TX/RX path"
+    - "find deadlock risks in this trace"
+
+- The user provides a Linux kernel stack trace (BUG / WARNING / WARN_ON output).
+
+
+--------------------------------------------------------------------------------
+6. WiFi Driver Domain Knowledge (Built-in Reference)
+--------------------------------------------------------------------------------
+
+6.1 Standard Interface Functions (cfg80211 / mac80211)
+-------------------------------------------------------
+  cfg80211_ops callbacks : connect, disconnect, scan, add_key, set_channel, ...
+  mac80211_ops callbacks : tx, start, stop, add_interface, sta_add, ...
+  netdev_ops callbacks   : ndo_open, ndo_stop, ndo_start_xmit, ndo_get_stats64, ...
+
+6.2 Known Context Patterns
+---------------------------
+  TX path : process/softirq → ndo_start_xmit → driver TX queue → FW command
+  RX path : hardirq (ISR) → napi_schedule → softirq → driver_poll → netif_receive_skb
+  Scan    : process (cfg80211 workqueue) → driver scan → FW scan command
+             FW scan done event → driver event handler → cfg80211_scan_done
+  FW events: hardirq or workqueue depending on bus type (PCIe MSI vs SDIO)
+
+6.3 WiFi-Specific Lock Semantics
+----------------------------------
+  rtnl_lock   : Top-level network config lock; held during ifup/ifdown, scan start
+  wiphy_lock  : cfg80211 per-wiphy lock (replaced rtnl for most cfg80211 ops in 5.12+)
+  local->mtx  : mac80211 master lock; held during vif/sta add/remove
+  driver locks: Typically spinlocks for TX/RX queue access, mutex for config paths
+
+  Common ordering constraint:
+    rtnl_lock > wiphy_lock > local->mtx > driver_priv_lock
+  Violations of this order are a deadlock risk and must be flagged.
+
+
+--------------------------------------------------------------------------------
+7. Example Annotated Output (Reference)
+--------------------------------------------------------------------------------
+
+Input trace (abbreviated):
+
+  cfg80211_connect()
+    └── drv_connect()                        [process, rtnl_lock held]
+          └── driver_connect_request()
+                └── driver_send_fw_cmd()     [process → posts to FW cmd queue]
+  ...
+  driver_isr()                               [hardirq]
+    └── napi_schedule(&priv->napi)           [ORIGIN: NAPI#CONN_RESP]
+  ...
+  net_rx_action()                            [softirq, BACK-REF: NAPI#CONN_RESP]
+    └── driver_poll()
+          └── driver_process_fw_event()
+                └── cfg80211_connect_result() [upcall to cfg80211]
+
+Expected annotations:
+
+  - driver_isr → napi_schedule: ORIGIN tag NAPI#CONN_RESP, context hardirq
+  - driver_poll: BACK-REF to NAPI#CONN_RESP, context softirq
+  - Dashed arrow in diagram: hardirq --(napi_schedule / NET_RX_SOFTIRQ)--> softirq
+  - Lock table: rtnl_lock acquired in cfg80211_connect, released after drv_connect returns
+  - Anomaly check: cfg80211_connect_result() called from softirq — verify this is valid
+
+
+================================================================================
+  End of Requirements
+================================================================================
