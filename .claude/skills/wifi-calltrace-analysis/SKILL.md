@@ -88,17 +88,17 @@ Run the extraction script to build call chains from source code:
 
 ```bash
 mkdir -p .claude/skills/wifi-calltrace-analysis/output
-python3 scripts/extract_calltrace.py <driver_path> --auto-detect --max-depth 5 --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
+python3 scripts/extract_calltrace.py <driver_path> --auto-detect --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
 ```
 
 To analyze specific entry points only:
 ```bash
-python3 scripts/extract_calltrace.py <driver_path> --entry slsi_connect --entry slsi_scan --max-depth 5 --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
+python3 scripts/extract_calltrace.py <driver_path> --entry slsi_connect --entry slsi_scan --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
 ```
 
 If the driver requires additional include paths or defines:
 ```bash
-python3 scripts/extract_calltrace.py <driver_path> --auto-detect --max-depth 5 \
+python3 scripts/extract_calltrace.py <driver_path> --auto-detect \
     -I /path/to/kernel/include -D CONFIG_SCSC_WLAN_ANDROID --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
 ```
 

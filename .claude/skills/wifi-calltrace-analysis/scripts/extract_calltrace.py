@@ -13,7 +13,7 @@ Options:
     --output <path>       Output JSON file (default: stdout)
     --entry <func>        Entry point function name (repeatable)
     --auto-detect         Auto-detect entry points from ops tables and NAPI/ISR
-    --max-depth <N>       Maximum call chain depth (default: 10)
+    --max-depth <N>       Maximum call chain depth (default: unlimited)
     --exclude-prefix <p>  Exclude functions matching prefix (repeatable)
     --include <path>      Additional include path for clang -E (repeatable)
     --define <macro>      Additional macro definition for clang -E (repeatable)
@@ -384,7 +384,7 @@ LOCK_APIS = {
 
 def preprocess_file(filepath, include_paths=None, defines=None):
     """Preprocess a C file with clang -E.  Returns preprocessed source or None on failure."""
-    cmd = ["clang", "-E", "-P",       # preprocess only, no line markers
+    cmd = ["clang", "-E",             # preprocess only (keep line markers for mapping)
            "-w",                       # suppress warnings
            "-nostdinc",                # don't use system includes (use only explicit -I)
            "-D__KERNEL__",             # kernel code marker
@@ -406,18 +406,67 @@ def preprocess_file(filepath, include_paths=None, defines=None):
         return None
 
 
+_LINE_MARKER_RE = re.compile(r'^#\s+(\d+)\s+"([^"]+)"')
+
+
+def build_line_map(source):
+    """Build a mapping from physical line numbers to (original_file, original_line).
+
+    Parses clang -E line markers of the form:  # N "file" [flags]
+    Returns a sorted list of (physical_line, orig_file, orig_line_start).
+    """
+    markers = []
+    for phys_line, text in enumerate(source.split('\n'), 1):
+        m = _LINE_MARKER_RE.match(text)
+        if m:
+            orig_line = int(m.group(1))
+            orig_file = os.path.basename(m.group(2))
+            markers.append((phys_line, orig_file, orig_line))
+    return markers
+
+
+def resolve_line(markers, phys_line):
+    """Given a physical line in preprocessed output, return (orig_file, orig_line).
+
+    Uses binary search on markers built by build_line_map().
+    """
+    if not markers:
+        return None, phys_line
+
+    # Binary search: find last marker with physical_line <= phys_line
+    lo, hi = 0, len(markers) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if markers[mid][0] <= phys_line:
+            lo = mid
+        else:
+            hi = mid - 1
+
+    marker_phys, orig_file, orig_line_start = markers[lo]
+    if marker_phys > phys_line:
+        return None, phys_line
+
+    orig_line = orig_line_start + (phys_line - marker_phys - 1)
+    return orig_file, orig_line
+
+
 def parse_file(filepath, filename, include_paths=None, defines=None):
     """Parse a single C file.  Returns (functions, ops_tables).
 
     If clang is available, preprocesses with clang -E first to resolve
-    #ifdef blocks and macros. Falls back to raw source if clang fails.
+    #ifdef blocks and macros.  Line markers from clang -E are used to
+    map back to original source file names and line numbers.
+    Falls back to raw source if clang fails.
 
     functions:  dict  name -> FunctionInfo
     ops_tables: list  [{"struct_type": ..., "var_name": ..., "assignments": {field: func}}]
     """
     # Try clang preprocessing first
     source = preprocess_file(filepath, include_paths, defines)
-    if source is None:
+    line_markers = None
+    if source is not None:
+        line_markers = build_line_map(source)
+    else:
         # Fallback: read raw source
         try:
             with open(filepath, "r", errors="replace") as f:
@@ -600,6 +649,30 @@ def parse_file(filepath, filename, include_paths=None, defines=None):
 
         i += 1
 
+    # Post-process: map preprocessed line numbers back to original source
+    if line_markers:
+        for fi in functions.values():
+            orig_file, orig_line = resolve_line(line_markers, fi.line)
+            if orig_file:
+                fi.file = orig_file
+                fi.line = orig_line
+            for lock_op in fi.lock_ops:
+                _, orig_lock_line = resolve_line(line_markers, lock_op["line"])
+                lock_op["line"] = orig_lock_line
+        for table in ops_tables:
+            # Use the var_name token's line (approximated by first assignment)
+            # The file is already set from the struct type context
+            pass  # ops table file is set below
+
+    # For ops tables, resolve file from the first assignment's function if available
+    if line_markers:
+        for table in ops_tables:
+            # Find the physical line of the struct by checking token positions
+            # Use the filename from the first assigned function as a proxy
+            first_func = next(iter(table["assignments"].values()), None)
+            if first_func and first_func in functions:
+                table["file"] = functions[first_func].file
+
     return functions, ops_tables
 
 
@@ -755,7 +828,7 @@ def extract_call_chain(all_functions, entry_func, max_depth, exclude_prefixes):
             continue
         visited.add(func_name)
 
-        if depth > max_depth:
+        if max_depth > 0 and depth > max_depth:
             continue
 
         if any(func_name.startswith(p) for p in exclude_prefixes):
@@ -830,8 +903,8 @@ def main():
                         help="Entry point function name (repeatable)")
     parser.add_argument("--auto-detect", "-a", action="store_true",
                         help="Auto-detect entry points from ops tables")
-    parser.add_argument("--max-depth", "-d", type=int, default=10,
-                        help="Maximum call chain depth (default: 10)")
+    parser.add_argument("--max-depth", "-d", type=int, default=0,
+                        help="Maximum call chain depth (default: 0 = unlimited)")
     parser.add_argument("--exclude-prefix", "-x", action="append", default=[],
                         help="Exclude functions matching prefix (repeatable)")
     parser.add_argument("--include", "-I", action="append", default=[],
