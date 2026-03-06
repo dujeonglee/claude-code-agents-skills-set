@@ -53,6 +53,7 @@ User: Analyze this call trace:
 | O2 | Function Analysis Table | 7-column table: #, Function, Layer, Context, Locks, Responsibility, Notes |
 | O3 | Context Transition Summary | All context transitions with trigger/execution pairs |
 | O4 | Lock Dependency Graph | Directed graph of lock acquisition order with cycle detection |
+| O5 | Per-Variant Call Graph Comparison | Cross-variant diff of entry points, nodes, and edges by kernel config |
 
 ---
 
@@ -70,13 +71,47 @@ subagents have write permission without additional configuration.
 **Output structure:**
 ```
 output/
-  calltrace_data.json              # Phase 1: extracted call chains (all entries)
+  calltrace_data.json              # Phase 1: extracted call chains (default/single variant)
+  calltrace_data_<variant>.json    # Phase 1: extracted call chains (per variant, if variants detected)
   phase2a_<entry>.json             # Phase 2a: context analysis (per entry)
   phase2b_<entry>.json             # Phase 2b: lock analysis (per entry)
   phase3_<entry>.md                # Phase 3: raw deliverables (per entry)
   <entry>.md                       # Phase 4: final document (per entry)
   index.md                         # Phase 5: summary index with cross-entry analysis
+  variant_comparison.md            # Phase 6: per-variant call graph comparison (if variants exist)
 ```
+
+### Phase 0: Variant Detection (source directory only)
+
+Run the extraction script with `--detect-variants` to automatically identify
+kernel config variants. See `topics/05-per-variant-callgraph.md` for details.
+
+```bash
+python3 scripts/extract_calltrace.py <driver_path> --detect-variants
+```
+
+The script uses three-tier detection:
+
+1. **Tier 1 (highest impact)**: Makefile `ifeq/else` blocks that switch `.o`
+   file targets — entire source files are swapped between variants.
+2. **Tier 2 (medium impact)**: Makefile `ccflags-$(CONFIG_X)` and
+   `ccflags-y += -DCONFIG_X` lines — compile-time defines that activate
+   `#ifdef` blocks within shared source files.
+3. **Tier 3 (variable impact)**: Source `#ifdef CONFIG_*` blocks with guarded
+   line count above a threshold (default: 50 lines). Use `--min-lines` to
+   adjust the threshold.
+
+Kconfig `select` dependencies are resolved automatically — implied configs
+are included in each variant's define set.
+
+**Output:** JSON with all detected variants, grouped by tier. Tier 2/3 configs
+that are implied by a Tier 1 config are folded into the Tier 1 variant.
+
+**Present the discovered variants to the user for confirmation before Phase 1.**
+The user selects which variants to extract (typically Tier 1 variants that
+switch source files).
+
+If no variants are found, skip Phase 0 and proceed with a single extraction.
 
 ### Phase 1: Data Collection
 
@@ -84,7 +119,33 @@ Determine the input type and extract call chain data.
 
 **Input type A — Source directory (primary use case):**
 
-Run the extraction script to build call chains from source code:
+Run the extraction script to build call chains from source code.
+
+**If Phase 0 detected variants**, run extraction once per variant:
+
+```bash
+mkdir -p .claude/skills/wifi-calltrace-analysis/output
+
+# Variant A
+python3 scripts/extract_calltrace.py <driver_path> --auto-detect \
+    -D CONFIG_X -D CONFIG_Y \
+    --variant variant_a \
+    --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data_variant_a.json
+
+# Variant B (baseline)
+python3 scripts/extract_calltrace.py <driver_path> --auto-detect \
+    --variant variant_b \
+    --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data_variant_b.json
+```
+
+Also create a **union** file for Phases 2–5 (use the variant with the most
+entry points as the primary `calltrace_data.json`):
+```bash
+cp .claude/skills/wifi-calltrace-analysis/output/calltrace_data_variant_a.json \
+   .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
+```
+
+**If no variants detected**, run a single extraction:
 
 ```bash
 mkdir -p .claude/skills/wifi-calltrace-analysis/output
@@ -99,7 +160,7 @@ python3 scripts/extract_calltrace.py <driver_path> --entry slsi_connect --entry 
 If the driver requires additional include paths or defines:
 ```bash
 python3 scripts/extract_calltrace.py <driver_path> --auto-detect \
-    -I /path/to/kernel/include -D CONFIG_SCSC_WLAN_ANDROID --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
+    -I /path/to/kernel/include -D CONFIG_FEATURE_X --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
 ```
 
 The script:
@@ -109,6 +170,7 @@ The script:
 - Extracts call chains using BFS traversal of caller→callee edges
 - Detects deferred execution triggers (`napi_schedule`, `schedule_work`, etc.)
 - Outputs structured JSON with nodes, edges, and deferred triggers per entry point
+- Stores the `--variant` name and `-D` defines in the output JSON for traceability
 
 **Prerequisite:** `clang` must be installed (`xcode-select --install` on macOS / `apt install clang` on Linux).
 Falls back to raw source parsing if clang is unavailable (less accurate with `#ifdef` blocks).
@@ -329,6 +391,69 @@ frequency. These are the most critical shared code paths.
 - Cross-entry lock ordering conflicts (if any) are clearly flagged
 - Shared function overlap table is sorted by frequency descending
 
+### Phase 6: Per-Variant Call Graph Comparison (if variants exist)
+
+**Skip this phase if Phase 0 detected no variants (single extraction run).**
+
+After all per-entry documents are written, generate a variant comparison
+document at:
+```
+.claude/skills/wifi-calltrace-analysis/output/variant_comparison.md
+```
+
+Launch a subagent to produce the O5 deliverable.
+
+**Subagent instructions:**
+- Read: `topics/05-per-variant-callgraph.md` (O5 format specification)
+- Input: All `calltrace_data_<variant>.json` files from Phase 1
+- The subagent MUST read both variant JSON files and compare them
+  programmatically — do not guess differences
+
+**The subagent performs three comparisons:**
+
+1. **Entry point availability**: Which entry points exist in each variant?
+   Some entry points are variant-exclusive (e.g., a NAPI poll handler in
+   one variant vs an IRQ handler in another).
+
+2. **Shared entry point diffs**: For entry points that appear in both
+   variants, compare their node lists and edge lists. Report functions
+   and call edges that exist in only one variant.
+
+3. **Variant-exclusive entry point listing**: List entry points unique to
+   each variant with links to their per-entry documents.
+
+**Output format:**
+
+```markdown
+# Per-Variant Call Graph Comparison
+
+> Variants: <variant_a> (<N> defines), <variant_b> (<M> defines)
+
+## Variant Configuration
+| Variant | Defines | Entry Points | Total Functions |
+|---------|---------|-------------|-----------------|
+
+## Entry Point Availability
+| Entry Point | Ops Table | <variant_a> | <variant_b> |
+|-------------|-----------|-------------|-------------|
+
+## Shared Entry Point Diffs
+### <entry_point>
+(node diff table, edge diff table — only for entries with differences)
+
+## Variant-Exclusive Entry Points
+### <variant_a> only
+- [entry_a](entry_a.md)
+### <variant_b> only
+- [entry_b](entry_b.md)
+```
+
+**Verification after Phase 6:**
+- Every variant JSON from Phase 1 is referenced in the comparison
+- Entry point availability matrix covers all entry points from all variants
+- Shared entry point diffs only list functions/edges actually present in the JSON data
+- Variant-exclusive entry points link to existing per-entry `.md` files
+
 ---
 
 ## Deferred Execution: The Key Requirement
@@ -363,6 +488,10 @@ Unlinked deferred paths are the #1 failure mode for this skill.
 - DO run `validate_output.py` after each entry point to catch hallucination early.
 - DO re-run failed phases when validation reports errors — do not skip validation.
 - DO read source files when needed to resolve lock patterns that cscope edges alone cannot show.
+- DO use `--detect-variants` in Phase 0 to detect config variants automatically (three-tier detection).
+- DO run extraction separately per variant when variants are detected — each run needs its own `-D` flags and `--variant` tag.
+- DO generate per-variant comparison (Phase 6) when multiple variants exist.
+- DO include implied configs (from `select` in Kconfig) in each variant's define set.
 
 ## DON'T
 
@@ -378,3 +507,6 @@ Unlinked deferred paths are the #1 failure mode for this skill.
 - DON'T skip the index generation (Phase 5) — the cross-entry analysis catches global issues.
 - DON'T skip validation (Phase 4b) — it is the primary defense against hallucination.
 - DON'T ignore validation errors — re-run the failed subagent phase before proceeding.
+- DON'T mix defines from different variants in a single extraction run.
+- DON'T skip Phase 0 `--detect-variants` — missing variants means incomplete call graph coverage.
+- DON'T guess variant differences — always compare the actual JSON data from each extraction.

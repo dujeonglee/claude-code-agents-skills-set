@@ -146,15 +146,51 @@ If no locks are present in the trace, write:
 
 ---
 
+---
+
+## O5: Per-Variant Call Graph Comparison
+
+This deliverable is only generated when **multiple extraction variants** exist
+(i.e., Phase 0 detected config variants and Phase 1 ran multiple extractions).
+
+See `topics/05-per-variant-callgraph.md` for the full specification.
+
+### Required Sub-sections
+
+1. **Variant Configuration** — table of variant names, defines, entry point
+   counts, and total function counts.
+
+2. **Entry Point Availability** — matrix showing which entry points exist in
+   which variant. Mark with `YES` or `-`.
+
+3. **Shared Entry Point Diffs** — for each shared entry point that has
+   differences, show:
+   - Node diff: functions only in variant A, only in variant B
+   - Edge diff: call edges that differ
+   - Only include entries with actual differences — skip identical entries.
+
+4. **Variant-Exclusive Entry Points** — list entry points unique to each
+   variant with links to their per-entry documents.
+
+### Rules
+
+- Compare ONLY data from the extraction JSON files — do not invent differences.
+- Omit the diff section for shared entry points with identical node/edge sets.
+- Sort the entry point availability matrix by ops table, then alphabetically.
+
+---
+
 ## Assembly Order
 
-Present the four deliverables in this order:
+Present the four per-entry deliverables in this order:
 1. O1 — Flow Diagram
 2. O2 — Function Analysis Table
 3. O3 — Context Transition Summary
 4. O4 — Lock Dependency Graph
 
-Each section gets a `## ` heading:
+O5 (Per-Variant Comparison) is a separate document, not part of per-entry files.
+
+Each per-entry section gets a `## ` heading:
 ```markdown
 ## Call Trace Flow Diagram
 ## Function Analysis Table
@@ -172,6 +208,7 @@ Each section gets a `## ` heading:
 - DO include the Tag ID in all three places: diagram label, table Notes column, transition summary.
 - DO detect and report lock cycles even if only potential (different code paths).
 - DO present deliverables in the order O1, O2, O3, O4.
+- DO generate O5 when multiple variants exist — compare extraction JSON data directly.
 
 ## DON'T
 
@@ -181,3 +218,4 @@ Each section gets a `## ` heading:
 - DON'T skip functions in the table that appear in the diagram — they must match.
 - DON'T report a deadlock without showing the specific cycle path and involved functions.
 - DON'T generate invalid Mermaid syntax — verify participant declarations match usage.
+- DON'T guess variant differences — always derive them from the extraction JSON files.

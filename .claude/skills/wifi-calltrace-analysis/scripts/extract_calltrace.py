@@ -893,6 +893,338 @@ def extract_call_chain(all_functions, entry_func, max_depth, exclude_prefixes):
 # Part 6: Main
 # =========================================================================
 
+# =========================================================================
+# Part 7: Variant Detection
+# =========================================================================
+
+def _parse_makefile_tier1(makefile_path):
+    """Tier 1: Find configs that switch .o file targets in Makefile.
+
+    Looks for patterns like:
+        ifeq ($(CONFIG_X),y)
+        obj += file_a.o
+        else
+        obj += file_b.o
+        endif
+
+    Returns list of dicts with config, files_when_set, files_when_unset.
+    """
+    try:
+        with open(makefile_path, "r", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+
+    results = []
+    ifeq_re = re.compile(
+        r'^\s*ifeq\s+\([$]\((\w+)\)\s*,\s*y\)')
+    obj_re = re.compile(
+        r'[\w-]+[$]\([^)]+\)\s*\+=\s*([\w.]+\.o)')
+
+    # Scan every ifeq independently (don't skip lines consumed by outer blocks)
+    for i, raw_line in enumerate(lines):
+        m = ifeq_re.match(raw_line)
+        if not m:
+            continue
+
+        config = m.group(1)
+        # Collect .o files in the if-branch and else-branch at depth 1 relative to this ifeq
+        if_objs = []
+        else_objs = []
+        in_else = False
+        depth = 1
+        j = i + 1
+        while j < len(lines) and depth > 0:
+            line = lines[j].strip()
+            if line.startswith(('ifeq', 'ifneq', 'ifdef', 'ifndef')):
+                depth += 1
+            elif line == 'endif':
+                depth -= 1
+            elif line == 'else' and depth == 1:
+                in_else = True
+                j += 1
+                continue
+
+            if depth == 1:
+                om = obj_re.search(lines[j])
+                if om:
+                    obj_file = om.group(1)
+                    if in_else:
+                        else_objs.append(obj_file)
+                    else:
+                        if_objs.append(obj_file)
+            j += 1
+
+        # Only report if both branches have .o files (actual file switch)
+        if if_objs and else_objs:
+            results.append({
+                "config": config,
+                "files_when_set": if_objs,
+                "files_when_unset": else_objs,
+            })
+
+    return results
+
+
+def _parse_makefile_tier2(makefile_path):
+    """Tier 2: Find configs passed as -D flags via ccflags in Makefile.
+
+    Looks for patterns like:
+        ccflags-$(CONFIG_X) += -DCONFIG_X
+        ccflags-y += -DCONFIG_X   (inside ifeq blocks)
+
+    Returns list of config names.
+    """
+    try:
+        with open(makefile_path, "r", errors="replace") as f:
+            content = f.read()
+    except OSError:
+        return []
+
+    configs = set()
+
+    # Pattern 1: ccflags-$(CONFIG_X) += -DCONFIG_X
+    for m in re.finditer(r'ccflags-[$]\((\w+)\)\s*\+=\s*-D(\w+)', content):
+        configs.add(m.group(2))
+
+    # Pattern 2: ccflags-y += -DCONFIG_X (standalone or inside ifeq)
+    for m in re.finditer(r'ccflags-y\s*\+=\s*-D(\w+)', content):
+        configs.add(m.group(1))
+
+    return sorted(configs)
+
+
+def _parse_kconfig_selects(kconfig_path):
+    """Parse Kconfig for 'select' dependencies.
+
+    Returns dict: config_name -> list of selected configs.
+    """
+    try:
+        with open(kconfig_path, "r", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return {}
+
+    selects = {}
+    current_config = None
+
+    for line in lines:
+        stripped = line.strip()
+        # Match 'config CONFIG_NAME' or 'config NAME'
+        cm = re.match(r'^config\s+(\w+)', stripped)
+        if cm:
+            current_config = cm.group(1)
+            # Normalize: add CONFIG_ prefix if not present
+            if not current_config.startswith('CONFIG_'):
+                current_config = 'CONFIG_' + current_config
+            continue
+
+        if current_config and stripped.startswith('select'):
+            sm = re.match(r'select\s+(\w+)', stripped)
+            if sm:
+                selected = sm.group(1)
+                if not selected.startswith('CONFIG_'):
+                    selected = 'CONFIG_' + selected
+                selects.setdefault(current_config, []).append(selected)
+
+    return selects
+
+
+def _scan_source_ifdef(source_dir):
+    """Tier 3: Scan source files for #ifdef CONFIG_* blocks and count guarded lines.
+
+    Returns dict: config_name -> {"files": set, "guarded_lines": int}.
+    """
+    files = find_source_files(source_dir)
+    config_re = re.compile(
+        r'#\s*(?:ifdef|ifndef)\s+(CONFIG_\w+)'
+        r'|#\s*if\s+.*?\bdefined\s*\(\s*(CONFIG_\w+)\s*\)')
+
+    stats = {}  # config -> {"files": set, "guarded_lines": int}
+
+    for fpath in files:
+        try:
+            with open(fpath, "r", errors="replace") as f:
+                lines = f.readlines()
+        except OSError:
+            continue
+
+        fname = os.path.relpath(fpath, source_dir)
+        # Track nested #if depth and which configs are active at each depth
+        depth_stack = []  # stack of config names (or None for non-CONFIG #if)
+
+        i = 0
+        while i < len(lines):
+            stripped = lines[i].strip()
+
+            # Match #ifdef CONFIG_X or #if defined(CONFIG_X)
+            cm = config_re.match(stripped)
+            if cm:
+                config = cm.group(1) or cm.group(2)
+                depth_stack.append(config)
+                i += 1
+                continue
+
+            # Match other #if / #ifdef / #ifndef (non-CONFIG)
+            if re.match(r'#\s*(?:if|ifdef|ifndef)\b', stripped):
+                depth_stack.append(None)
+                i += 1
+                continue
+
+            # Match #endif
+            if re.match(r'#\s*endif\b', stripped):
+                if depth_stack:
+                    depth_stack.pop()
+                i += 1
+                continue
+
+            # Match #else / #elif — attribute lines to the config at current depth
+            if re.match(r'#\s*(?:else|elif)\b', stripped):
+                i += 1
+                continue
+
+            # Count this line for all CONFIG_* in the depth stack
+            for config in depth_stack:
+                if config is not None:
+                    if config not in stats:
+                        stats[config] = {"files": set(), "guarded_lines": 0}
+                    stats[config]["files"].add(fname)
+                    stats[config]["guarded_lines"] += 1
+
+            i += 1
+
+    return stats
+
+
+def detect_variants(source_dir, min_lines=50):
+    """Detect kernel config variants using three-tier analysis.
+
+    Tier 1: Makefile .o file switches (highest impact)
+    Tier 2: Makefile ccflags -D defines (medium impact)
+    Tier 3: Source #ifdef guarded lines above threshold (variable impact)
+
+    Returns a structured dict with all tiers and grouping info.
+    """
+    makefile_path = os.path.join(source_dir, "Makefile")
+    kconfig_path = os.path.join(source_dir, "Kconfig")
+
+    # --- Tier 1 ---
+    tier1 = _parse_makefile_tier1(makefile_path)
+    tier1_configs = set()
+    for entry in tier1:
+        tier1_configs.add(entry["config"])
+        # Normalize
+        if not entry["config"].startswith("CONFIG_"):
+            entry["config"] = "CONFIG_" + entry["config"]
+            tier1_configs.add(entry["config"])
+
+    # --- Tier 2 ---
+    tier2_all = _parse_makefile_tier2(makefile_path)
+    # Exclude configs already in Tier 1
+    tier2 = [c for c in tier2_all if c not in tier1_configs
+             and not any(c == e["config"] or c == e["config"].replace("CONFIG_", "", 1)
+                         for e in tier1)]
+
+    # --- Kconfig select dependencies ---
+    kconfig_selects = _parse_kconfig_selects(kconfig_path)
+
+    # --- Tier 3 ---
+    ifdef_stats = _scan_source_ifdef(source_dir)
+    tier3 = []
+    tier12_configs = tier1_configs | set(tier2)
+    for config, info in sorted(ifdef_stats.items(),
+                                key=lambda x: -x[1]["guarded_lines"]):
+        if config in tier12_configs:
+            continue
+        # Also skip if it's a bare name match (without CONFIG_ prefix)
+        bare = config.replace("CONFIG_", "", 1)
+        if bare in tier12_configs or ("CONFIG_" + bare) in tier12_configs:
+            continue
+        if info["guarded_lines"] >= min_lines:
+            tier3.append({
+                "config": config,
+                "guarded_lines": info["guarded_lines"],
+                "file_count": len(info["files"]),
+                "files": sorted(info["files"]),
+            })
+
+    # --- Grouping: resolve select dependencies ---
+    def get_implied(config):
+        """Get all configs implied by 'select' for a given config."""
+        implied = []
+        # Try both with and without CONFIG_ prefix
+        for key in [config, config.replace("CONFIG_", "", 1),
+                    "CONFIG_" + config.replace("CONFIG_", "", 1)]:
+            if key in kconfig_selects:
+                implied.extend(kconfig_selects[key])
+        return implied
+
+    # Build variant groups
+    variants = []
+    grouped_configs = set()
+
+    # Tier 1 variants
+    for entry in tier1:
+        config = entry["config"]
+        implied = get_implied(config)
+        defines = list(dict.fromkeys([config] + implied))  # deduplicate, preserve order
+        variants.append({
+            "name": config.replace("CONFIG_", "").lower(),
+            "tier": 1,
+            "primary_config": config,
+            "defines": defines,
+            "files_when_set": entry["files_when_set"],
+            "files_when_unset": entry["files_when_unset"],
+        })
+        grouped_configs.add(config)
+        grouped_configs.update(implied)
+
+    # Tier 2 standalone (not already grouped into a Tier 1 variant)
+    for config in tier2:
+        if config in grouped_configs:
+            continue
+        implied = get_implied(config)
+        variants.append({
+            "name": config.replace("CONFIG_", "").lower(),
+            "tier": 2,
+            "primary_config": config,
+            "defines": list(dict.fromkeys([config] + implied)),
+        })
+        grouped_configs.add(config)
+        grouped_configs.update(implied)
+
+    # Tier 3 standalone
+    for entry in tier3:
+        config = entry["config"]
+        if config in grouped_configs:
+            continue
+        implied = get_implied(config)
+        variants.append({
+            "name": config.replace("CONFIG_", "").lower(),
+            "tier": 3,
+            "primary_config": config,
+            "defines": list(dict.fromkeys([config] + implied)),
+            "guarded_lines": entry["guarded_lines"],
+            "file_count": entry["file_count"],
+        })
+        grouped_configs.add(config)
+        grouped_configs.update(implied)
+
+    return {
+        "source_dir": source_dir,
+        "min_lines_threshold": min_lines,
+        "tier1_count": len(tier1),
+        "tier2_count": len(tier2),
+        "tier3_count": len(tier3),
+        "variant_count": len(variants),
+        "variants": variants,
+        "kconfig_selects": {k: v for k, v in kconfig_selects.items()
+                           if any(k == ve.get("primary_config", "")
+                                  or k.replace("CONFIG_", "", 1) == ve.get("primary_config", "").replace("CONFIG_", "", 1)
+                                  for ve in variants)},
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Extract call traces from C source code using built-in tokenizer."
@@ -913,12 +1245,47 @@ def main():
     parser.add_argument("--define", "-D", action="append", default=[],
                         dest="defines",
                         help="Additional macro definition for clang -E (repeatable)")
+    parser.add_argument("--variant", "-V",
+                        help="Variant name tag for this extraction run "
+                             "(e.g., 'variant_a', 'variant_b'). Stored in "
+                             "output JSON as 'variant' field for "
+                             "per-variant comparison.")
+    parser.add_argument("--detect-variants", action="store_true",
+                        help="Detect kernel config variants and print "
+                             "results as JSON. Does not extract call chains. "
+                             "Uses three-tier analysis: Makefile .o switches, "
+                             "Makefile ccflags, and source #ifdef scanning.")
+    parser.add_argument("--min-lines", type=int, default=50,
+                        help="Minimum guarded line count for Tier 3 variant "
+                             "detection (default: 50)")
     args = parser.parse_args()
 
     source_dir = os.path.abspath(args.source_dir)
     if not os.path.isdir(source_dir):
         print(f"Error: {source_dir} is not a directory", file=sys.stderr)
         sys.exit(1)
+
+    # --- Variant detection mode ---
+    if args.detect_variants:
+        print(f"Detecting variants in: {source_dir}...", file=sys.stderr)
+        result = detect_variants(source_dir, min_lines=args.min_lines)
+        print(f"  Tier 1 (source file switches): {result['tier1_count']}",
+              file=sys.stderr)
+        print(f"  Tier 2 (build flag configs):    {result['tier2_count']}",
+              file=sys.stderr)
+        print(f"  Tier 3 (source #ifdef >= {args.min_lines} lines): "
+              f"{result['tier3_count']}", file=sys.stderr)
+        print(f"  Total variant candidates:       {result['variant_count']}",
+              file=sys.stderr)
+
+        output_json = json.dumps(result, indent=2)
+        if args.output:
+            with open(args.output, "w") as f:
+                f.write(output_json + "\n")
+            print(f"Written to {args.output}", file=sys.stderr)
+        else:
+            print(output_json)
+        sys.exit(0)
 
     # Check clang availability
     if shutil.which("clang"):
@@ -963,6 +1330,8 @@ def main():
     # Build result
     result = {
         "source_dir": source_dir,
+        "variant": args.variant,
+        "defines": args.defines,
         "total_files": file_count,
         "total_functions": len(all_functions),
         "ops_tables": [

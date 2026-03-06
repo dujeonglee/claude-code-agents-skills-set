@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.6.1] — 2026-03-07
+
+### Fixed
+- `extract_calltrace.py` — fixed Tier 1 regex: `\$` → `[$]` to match literal
+  `$` in Makefile lines (`ifeq_re`, `obj_re`, `ccflags_re`)
+- `extract_calltrace.py` — fixed Tier 1 parser: scan every `ifeq` independently
+  instead of skipping lines consumed by outer blocks (nested `ifeq` within
+  `else` branches was being missed)
+- `extract_calltrace.py` — deduplicated `defines` lists in variant output
+  using `dict.fromkeys()` to preserve order
+
+## [0.6.0] — 2026-03-07
+
+### Added
+- Per-variant call graph analysis (O5 deliverable)
+  - Phase 0: three-tier variant detection (`--detect-variants` flag)
+    - Tier 1: Makefile `ifeq/else` blocks that switch `.o` file targets
+    - Tier 2: Makefile `ccflags` `-D` defines
+    - Tier 3: Source `#ifdef CONFIG_*` blocks above line count threshold
+    - Kconfig `select` dependency resolution and variant grouping
+  - Phase 1: runs extraction separately per variant with different `-D` flags
+  - Phase 6: compares variant JSON outputs — entry point availability matrix,
+    shared entry point node/edge diffs, variant-exclusive entry point listing
+  - Output: `variant_comparison.md` with O5 deliverable
+- `extract_calltrace.py` — added `--variant` (`-V`) flag to tag output JSON
+  with a variant name; added `variant` and `defines` fields to output JSON
+- `extract_calltrace.py` — added `--detect-variants` flag and `--min-lines`
+  flag (default 50) for three-tier variant detection
+- `topics/05-per-variant-callgraph.md` — instructions for variant
+  identification, multi-extraction workflow, and O5 output format
+
 ## [0.5.0] — 2026-03-06
 
 ### Added
