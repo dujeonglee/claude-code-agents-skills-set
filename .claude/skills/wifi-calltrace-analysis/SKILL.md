@@ -26,9 +26,9 @@ User: Analyze the call traces in /path/to/wifi/driver
 ```
 
 The skill will:
-1. Run `extract_calltrace.py` to build a cscope database and extract call chains
-2. Analyze each call chain for layers, contexts, locks, and deferred linkage
-3. Produce four deliverables per entry point
+1. Run `extract_calltrace.py` to extract call chains from all detected entry points
+2. Analyze each entry point independently for layers, contexts, locks, and deferred linkage
+3. Produce one document per entry point (four deliverables each) plus a summary index
 
 For a specific entry point:
 ```
@@ -66,6 +66,17 @@ All intermediate and final output files are written to:
 ```
 This directory is created automatically. Using a workspace-relative path ensures
 subagents have write permission without additional configuration.
+
+**Output structure:**
+```
+output/
+  calltrace_data.json              # Phase 1: extracted call chains (all entries)
+  phase2a_<entry>.json             # Phase 2a: context analysis (per entry)
+  phase2b_<entry>.json             # Phase 2b: lock analysis (per entry)
+  phase3_<entry>.md                # Phase 3: raw deliverables (per entry)
+  <entry>.md                       # Phase 4: final document (per entry)
+  index.md                         # Phase 5: summary index with cross-entry analysis
+```
 
 ### Phase 1: Data Collection
 
@@ -193,12 +204,17 @@ Launch a subagent to produce the four deliverables.
 - Lock graph includes cycle detection results
 - Tag IDs are consistent across O1, O2, and O3
 
-### Phase 4: Assembly
+### Phase 4: Per-Entry Assembly
 
-Assemble the final output:
+For **each entry point**, assemble a standalone Markdown file and write it to:
+```
+.claude/skills/wifi-calltrace-analysis/output/<entry_point>.md
+```
+
+File content:
 
 ```markdown
-# Calltrace Analysis: <driver name or trace description>
+# Calltrace Analysis: <entry_point>
 
 > Source: <source directory or trace format> | Entry point: <function> | Functions: <count> | Direction: <top-down/bottom-up/bidirectional>
 
@@ -222,8 +238,59 @@ If anomalies were found, add a final section:
 - <anomaly description with affected functions>
 ```
 
-**For multiple entry points:** Repeat Phases 2–4 for each entry point, or
-produce a combined document with one section per entry point.
+**Repeat Phases 2–4 for every entry point** before proceeding to Phase 5.
+
+### Phase 5: Index Generation
+
+After all per-entry documents are written, generate an index file at:
+```
+.claude/skills/wifi-calltrace-analysis/output/index.md
+```
+
+The index provides a summary table of all analyzed entry points with links
+to their individual documents, plus a cross-entry lock ordering summary.
+
+```markdown
+# Calltrace Analysis Index: <driver name>
+
+> Source: <source directory> | Entry points: <count> | Total functions: <count>
+
+## Entry Point Summary
+
+| # | Entry Point | Ops Table | Category | Functions | Deferred Triggers | Lock Violations | Link |
+|---|-------------|-----------|----------|-----------|-------------------|-----------------|------|
+| 1 | slsi_connect | cfg80211_ops | connect | 186 | 5 | 0 | [view](slsi_connect.md) |
+| 2 | slsi_scan | cfg80211_ops | scan | 120 | 3 | 0 | [view](slsi_scan.md) |
+| ... | | | | | | | |
+
+## Cross-Entry Lock Ordering
+
+Merge all per-entry lock nesting chains into a single global lock ordering graph.
+Flag any **cross-entry ordering conflicts** — cases where entry A acquires lock X
+before lock Y, but entry B acquires lock Y before lock X.
+
+```mermaid
+graph TD
+    ...global lock ordering from all entries...
+```
+
+## Shared Function Overlap
+
+List functions that appear in multiple entry point call traces, sorted by
+frequency. These are the most critical shared code paths.
+
+| Function | Appears In | Layer | Context(s) |
+|----------|-----------|-------|------------|
+| slsi_mlme_tx_rx | 38/46 entries | Firmware Interface | process |
+| slsi_hip_transmit_frame | 35/46 entries | HW Abstraction | process |
+| ... | | | |
+```
+
+**Verification after Phase 5:**
+- Every entry point from Phase 1 has a corresponding `.md` file in the output dir
+- The index table row count matches the number of analyzed entry points
+- Cross-entry lock ordering conflicts (if any) are clearly flagged
+- Shared function overlap table is sorted by frequency descending
 
 ---
 
@@ -253,7 +320,9 @@ Unlinked deferred paths are the #1 failure mode for this skill.
 - DO use dashed arrows in Mermaid diagrams for deferred execution.
 - DO check lock ordering against the mandatory WiFi lock order (Topic 04).
 - DO use subagents for Phases 2a, 2b, and 3 — keep orchestration lightweight.
-- DO present all four deliverables (O1–O4) in every analysis.
+- DO present all four deliverables (O1–O4) in every per-entry document.
+- DO generate one document per entry point — never combine multiple entries into one file.
+- DO generate the index (Phase 5) after all entry points are analyzed.
 - DO read source files when needed to resolve lock patterns that cscope edges alone cannot show.
 
 ## DON'T
@@ -266,3 +335,5 @@ Unlinked deferred paths are the #1 failure mode for this skill.
 - DON'T invent layer names not in the five-layer hierarchy (Topic 04).
 - DON'T assume all functions run in the same context — check each one.
 - DON'T skip the lock dependency graph even if "no deadlocks found" — report that.
+- DON'T combine multiple entry points into a single document — one file per entry.
+- DON'T skip the index generation (Phase 5) — the cross-entry analysis catches global issues.
