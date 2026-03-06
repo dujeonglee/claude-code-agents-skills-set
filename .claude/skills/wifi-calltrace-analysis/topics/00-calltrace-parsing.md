@@ -34,7 +34,7 @@ Parse every function name from the trace in **caller → callee** order.
 
 ### Step 3: Annotate Layer Boundaries
 
-Assign each function to one of the five layers (see Topic 08):
+Assign each function to one of the five layers (see Topic 04):
 
 1. **Kernel Standard Interface** — cfg80211/mac80211/netdev framework functions
 2. **Driver Entry Points** — driver's implementations of framework callbacks

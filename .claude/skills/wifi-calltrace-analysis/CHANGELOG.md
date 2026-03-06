@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.3.0] — 2026-03-06
+
+### Changed
+- `scripts/extract_calltrace.py` — switched from cscope to clang preprocessing + built-in C tokenizer
+  - Uses `clang -E` to preprocess source files (resolves `#ifdef`, expands macros)
+  - Built-in C tokenizer parses the preprocessed output (guaranteed balanced braces)
+  - Falls back to raw source parsing if clang is unavailable
+  - Added `--include` / `-I` and `--define` / `-D` CLI options for clang include paths and defines
+  - Prerequisite changed: `clang` (instead of `cscope`)
+- `SKILL.md` — updated Phase 1 to document clang-based workflow and new CLI options
+
+## [0.2.0] — 2026-03-05
+
+### Added
+- `scripts/extract_calltrace.py` — call chain extraction with built-in C tokenizer (Python 3.8+)
+  - Auto-detects entry points from cfg80211_ops, netdev_ops, mac80211_ops, NAPI/ISR registrations
+  - BFS call chain traversal with configurable max depth
+  - Deferred execution trigger detection (napi_schedule, schedule_work, etc.)
+  - Noise filtering for macros, logging, and kernel leaf functions
+
+### Changed
+- `SKILL.md` — redesigned for source-directory-first workflow
+  - Phase 1 now runs extract_calltrace.py as primary input method
+  - Raw trace text supported as legacy fallback
+  - Phase 2 split into 2a (context analysis) + 2b (lock analysis) for smaller subagent context
+  - Added combined Phase 2 JSON schema for Phase 3 input contract
+  - Inlined format detection table in Phase 1 for orchestrator self-sufficiency
+- Fixed all stale "Topic 08" references to correct post-renumbering numbers
+
 ## [0.1.0] — 2026-03-04
 
 ### Added

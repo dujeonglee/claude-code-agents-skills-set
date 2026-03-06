@@ -127,7 +127,7 @@ Assemble the final document:
 | AC-2 | Every Responsibility starts with a verb, is one sentence | Regex check |
 | AC-3 | Every file assigned to exactly one module | Count vs scan data |
 | AC-4 | Every External Dep row names a specific function/struct/header | Scan dep tables |
-| AC-5 | Cohesion ratings consistent with criteria in Topic 03 | Cross-check |
+| AC-5 | Cohesion ratings consistent with criteria in Topic 02 | Cross-check |
 | AC-6 | Issues section omitted when no issues | Check for empty Issues |
 | AC-7 | Overall readability — would a new engineer understand the driver? | Final read-through |
 
@@ -168,4 +168,4 @@ Exception: Total driver LOC appears in the document header for orientation.
 - DON'T write module entries without the scan data — guessing file contents leads to errors.
 - DON'T present the inventory without running acceptance checks.
 - DON'T include a "Summary" or "Conclusion" section — the inventory speaks for itself.
-- DON'T add sections or fields not specified in Topic 02 — the format is fixed.
+- DON'T add sections or fields not specified in Topic 01 — the format is fixed.

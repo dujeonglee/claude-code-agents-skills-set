@@ -47,7 +47,7 @@ Check each lock against its context restriction:
 | `mutex_lock` called in softirq or hardirq context  | **BUG**  |
 | `mutex_lock` called while holding a spinlock        | **BUG**  |
 | `spin_lock` (non-BH) in code reachable from softirq | WARNING  |
-| Lock ordering violation (see Topic 08)             | **DEADLOCK RISK** |
+| Lock ordering violation (see Topic 04)             | **DEADLOCK RISK** |
 | Lock held across a context transition              | **DANGER** |
 
 ### Step 4: Record Lock Scope
@@ -136,7 +136,7 @@ Flag these anomalies:
 
 ## DO
 
-- DO check the mandatory lock ordering from Topic 08: `rtnl > wiphy > local->mtx > driver_priv`.
+- DO check the mandatory lock ordering from Topic 04: `rtnl > wiphy > local->mtx > driver_priv`.
 - DO flag every context-inappropriate lock usage as a violation.
 - DO record the full scope of each lock (all functions called while held).
 - DO write a one-line summary for every function — no exceptions.

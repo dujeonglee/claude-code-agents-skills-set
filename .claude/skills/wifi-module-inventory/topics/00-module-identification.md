@@ -54,7 +54,7 @@ Evidence types (strongest to weakest):
 
 ### Step 4: Apply Rule 3 — File Name Patterns as Hints
 
-Cross-reference file names against the pattern table in Topic 08.
+Cross-reference file names against the pattern table in Topic 03.
 These are starting hints only. Override with symbol evidence when they conflict.
 
 ### Step 5: Apply Rule 4 — Makefile as Tiebreaker
