@@ -58,6 +58,15 @@ User: Analyze this call trace:
 
 ## Workflow
 
+### Output Directory
+
+All intermediate and final output files are written to:
+```
+.claude/skills/wifi-calltrace-analysis/output/
+```
+This directory is created automatically. Using a workspace-relative path ensures
+subagents have write permission without additional configuration.
+
 ### Phase 1: Data Collection
 
 Determine the input type and extract call chain data.
@@ -67,18 +76,19 @@ Determine the input type and extract call chain data.
 Run the extraction script to build call chains from source code:
 
 ```bash
-python3 scripts/extract_calltrace.py <driver_path> --auto-detect --max-depth 5 --output /tmp/calltrace_data.json
+mkdir -p .claude/skills/wifi-calltrace-analysis/output
+python3 scripts/extract_calltrace.py <driver_path> --auto-detect --max-depth 5 --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
 ```
 
 To analyze specific entry points only:
 ```bash
-python3 scripts/extract_calltrace.py <driver_path> --entry slsi_connect --entry slsi_scan --max-depth 5 --output /tmp/calltrace_data.json
+python3 scripts/extract_calltrace.py <driver_path> --entry slsi_connect --entry slsi_scan --max-depth 5 --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
 ```
 
 If the driver requires additional include paths or defines:
 ```bash
 python3 scripts/extract_calltrace.py <driver_path> --auto-detect --max-depth 5 \
-    -I /path/to/kernel/include -D CONFIG_SCSC_WLAN_ANDROID --output /tmp/calltrace_data.json
+    -I /path/to/kernel/include -D CONFIG_SCSC_WLAN_ANDROID --output .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json
 ```
 
 The script:
@@ -125,8 +135,8 @@ Launch a subagent to perform call-order and context analysis.
 - Input: The call chain data from Phase 1 (JSON or parsed function list)
   - For source directory input: use one `call_traces` entry at a time
   - The script already identifies `deferred_triggers` — use these as starting points for R2-EXT
-- Output: JSON containing `functions` array and `context_transitions` array
-  (see schema in Topic 00)
+- Output: Write JSON to `.claude/skills/wifi-calltrace-analysis/output/phase2a_<entry_point>.json`
+  containing `functions` array and `context_transitions` array (see schema in Topic 00)
 
 **Verification after Phase 2a:**
 - Every function has a layer and context annotation
@@ -142,7 +152,8 @@ Launch a subagent to add lock analysis and function summaries.
 - Input: The Phase 2a JSON output, plus the original source files or trace text
   - For source directory input: the subagent may read specific `.c` files listed
     in the nodes to identify lock acquire/release patterns
-- Output: JSON adding `locks`, `nesting_order`, `violations`, and
+- Output: Write JSON to `.claude/skills/wifi-calltrace-analysis/output/phase2b_<entry_point>.json`
+  adding `locks`, `nesting_order`, `violations`, and
   `function_summaries` arrays (see schema in Topic 02)
 
 **Verification after Phase 2b:**
@@ -172,7 +183,8 @@ Launch a subagent to produce the four deliverables.
 **Subagent instructions:**
 - Read: `topics/03-calltrace-output-format.md` (O1–O4 format specification)
 - Input: The combined Phase 2 JSON (merged output from Phase 2a + 2b)
-- Output: Four Markdown sections (O1 diagram, O2 table, O3 transitions, O4 locks)
+- Output: Write four Markdown sections (O1 diagram, O2 table, O3 transitions, O4 locks)
+  to `.claude/skills/wifi-calltrace-analysis/output/phase3_<entry_point>.md`
 
 **Verification after Phase 3:**
 - Mermaid diagram uses dashed arrows for deferred execution, solid for direct calls

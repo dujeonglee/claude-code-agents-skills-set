@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1] — 2026-03-06
+
+### Changed
+- `SKILL.md` — changed output directory from `/tmp/` to workspace-relative
+  `.claude/skills/wifi-calltrace-analysis/output/`
+  - Fixes subagent write permission failures when running in background
+  - Added `output/.gitignore` to exclude generated files from version control
+  - Phase 2a/2b/3 output paths now include entry point name for multi-trace runs
+
 ## [0.3.0] — 2026-03-06
 
 ### Changed
