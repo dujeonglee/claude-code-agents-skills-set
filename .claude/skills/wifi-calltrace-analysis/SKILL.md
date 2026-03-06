@@ -238,7 +238,44 @@ If anomalies were found, add a final section:
 - <anomaly description with affected functions>
 ```
 
-**Repeat Phases 2–4 for every entry point** before proceeding to Phase 5.
+**Repeat Phases 2–4 for every entry point.** After each entry, run validation.
+
+### Phase 4b: Validation (per entry)
+
+Run the validation script after each entry point's assembly to catch hallucination:
+
+```bash
+python3 scripts/validate_output.py .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json <entry_point> \
+    --output-dir .claude/skills/wifi-calltrace-analysis/output
+```
+
+The script checks Phase 2a, 2b, and final output against extraction ground truth:
+
+| Check | What it catches | Severity |
+|-------|----------------|----------|
+| Invented functions | Function names not in extraction nodes | ERROR |
+| Invented callees | Caller→callee edges not in extraction data | ERROR |
+| Invalid layer names | Layer names outside the 5-layer hierarchy | ERROR |
+| Invalid context names | Context values outside the allowed set | ERROR |
+| Missing deferred triggers | Fewer transitions than extraction detected | ERROR |
+| Invented trigger functions | Trigger function not in extraction nodes | ERROR |
+| Invented violation functions | Lock violation referencing unknown function | ERROR |
+| Table function names | Functions in Markdown table not in extraction | ERROR |
+| Missing sections | Required Markdown sections (O1–O4) absent | ERROR |
+| No dashed arrows | Deferred triggers exist but no `-->>` in diagram | ERROR |
+| Missing functions | >50% of extraction functions absent | ERROR |
+| Tag ID format | Tags not following `MECHANISM#PURPOSE` convention | WARN |
+| Lock scope hallucination | Lock scope includes unknown function names | WARN |
+| Summary count | Fewer summaries than extraction nodes | WARN |
+
+**If errors are found:** Re-run the failed phase's subagent. The validation output
+identifies exactly which checks failed and which data was hallucinated.
+
+**To validate all entries at once** (after Phase 5):
+```bash
+python3 scripts/validate_output.py .claude/skills/wifi-calltrace-analysis/output/calltrace_data.json \
+    --all --output-dir .claude/skills/wifi-calltrace-analysis/output
+```
 
 ### Phase 5: Index Generation
 
@@ -323,6 +360,8 @@ Unlinked deferred paths are the #1 failure mode for this skill.
 - DO present all four deliverables (O1–O4) in every per-entry document.
 - DO generate one document per entry point — never combine multiple entries into one file.
 - DO generate the index (Phase 5) after all entry points are analyzed.
+- DO run `validate_output.py` after each entry point to catch hallucination early.
+- DO re-run failed phases when validation reports errors — do not skip validation.
 - DO read source files when needed to resolve lock patterns that cscope edges alone cannot show.
 
 ## DON'T
@@ -337,3 +376,5 @@ Unlinked deferred paths are the #1 failure mode for this skill.
 - DON'T skip the lock dependency graph even if "no deadlocks found" — report that.
 - DON'T combine multiple entry points into a single document — one file per entry.
 - DON'T skip the index generation (Phase 5) — the cross-entry analysis catches global issues.
+- DON'T skip validation (Phase 4b) — it is the primary defense against hallucination.
+- DON'T ignore validation errors — re-run the failed subagent phase before proceeding.

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0] — 2026-03-06
+
+### Added
+- `scripts/validate_output.py` — hallucination detection for subagent output
+  - Validates Phase 2a, 2b, and final Markdown against extraction ground truth
+  - Checks: invented functions, invalid layers/contexts, missing deferred triggers,
+    hallucinated callees, lock scope correctness, tag ID format, section completeness
+  - Supports per-entry (`--entry`) and batch (`--all`) validation modes
+  - Exit codes: 0 (pass), 1 (errors), 2 (warnings only)
+- `SKILL.md` — added Phase 4b (validation) between assembly and index generation
+
 ## [0.4.0] — 2026-03-06
 
 ### Changed
