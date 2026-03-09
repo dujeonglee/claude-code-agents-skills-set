@@ -60,7 +60,7 @@ def convert(input_path: Path, output_path: Path, title: Optional[str], theme: st
             'tables',
             'fenced_code',
             'toc',
-            CodeHiliteExtension(linenums=False, guess_lang=True),
+            CodeHiliteExtension(linenums=False, guess_lang=False),
         ],
         output_format='html5',
     )
@@ -198,6 +198,7 @@ def convert(input_path: Path, output_path: Path, title: Optional[str], theme: st
   }}
   {dark_css}
   {pygments_css}
+  .codehilite .err {{ border: none; }}
 </style>
 </head>
 <body>
